@@ -1,0 +1,189 @@
+<mvc:View
+	controllerName="finishing.sanfor.controller.FinishingForm"
+	xmlns:mvc="sap.ui.core.mvc"
+	xmlns="sap.m"
+	xmlns:f="sap.ui.layout.form"
+	xmlns:core="sap.ui.core"
+	displayBlock="true">
+
+	<Page id="page" class="sapUiSizeCompact" backgroundDesign="List">
+
+		<!-- Title + scan on the very top -->
+		<customHeader>
+			<Bar>
+				<contentLeft>
+					<Image src="img/logo.svg" densityAware="false" class="finLogo" tooltip="{i18n>appTitle}"/>
+					<Title text="{i18n>appTitle}" level="H2"/>
+				</contentLeft>
+				<contentMiddle>
+					<Input
+						id="inpScan"
+						value="{form>/scanText}"
+						placeholder="{i18n>phScan}"
+						enabled="{= !${form>/running} &amp;&amp; !${form>/stopped} }"
+						submit=".onScan"
+						width="22rem"/>
+					<Button
+						id="btnLoad"
+						text="{i18n>btnLoad}"
+						type="Emphasized"
+						icon="sap-icon://search"
+						enabled="{= !${form>/running} &amp;&amp; !${form>/stopped} }"
+						press=".onScan"/>
+				</contentMiddle>
+			</Bar>
+		</customHeader>
+
+		<!-- Machine start/stop + times + Save/Clear action toolbar on top -->
+		<subHeader>
+			<OverflowToolbar design="Solid" class="finActionBar">
+				<Button
+					id="btnStart"
+					text="{i18n>btnStart}"
+					type="Emphasized"
+					icon="sap-icon://play"
+					enabled="{form>/inputsEnabled}"
+					press=".onStart"/>
+				<Button
+					id="btnStop"
+					text="{i18n>btnStop}"
+					type="Reject"
+					icon="sap-icon://stop"
+					enabled="{form>/running}"
+					press=".onStop"/>
+
+				<core:Icon src="sap-icon://busy" size="1.25rem" visible="{form>/running}" class="finRunning"/>
+
+				<ToolbarSeparator/>
+				<Label text="{i18n>tbStarted}"/>
+				<Text text="{= ${form>/startedText} || '—' }"/>
+				<Label text="{i18n>tbStopped}"/>
+				<Text text="{= ${form>/stoppedText} || '—' }"/>
+				<Label text="{i18n>tbElapsed}"/>
+				<ObjectStatus
+					text="{form>/elapsedText}"
+					state="{= ${form>/running} ? 'Information' : (${form>/stopped} ? 'Success' : 'None') }"/>
+				<Label text="{i18n>tbMinutes}"/>
+				<ObjectStatus
+					text="{= ${form>/totalMinutesText} || '0' }"
+					state="{= ${form>/stopped} ? 'Success' : 'None' }"/>
+
+				<ToolbarSpacer/>
+				<Button
+					id="btnSave"
+					text="{i18n>btnSave}"
+					type="Emphasized"
+					icon="sap-icon://save"
+					enabled="{form>/stopped}"
+					press=".onSave"/>
+				<Button
+					id="btnClear"
+					text="{i18n>btnClear}"
+					icon="sap-icon://clear-all"
+					press=".onReset"/>
+			</OverflowToolbar>
+		</subHeader>
+
+		<content>
+			<!-- Batch details (left) and Finishing entry (right), side by side -->
+			<HBox wrap="Wrap" alignItems="Stretch" class="sapUiSmallMargin">
+
+				<!-- Left: read-only batch details -->
+				<Panel headerText="{i18n>batchTitle}" class="sapUiTinyMarginEnd sapUiTinyMarginBottom">
+					<layoutData>
+						<FlexItemData growFactor="1" baseSize="0%" minWidth="20rem"/>
+					</layoutData>
+					<f:SimpleForm
+						editable="false"
+						layout="ResponsiveGridLayout"
+						labelSpanXL="5" labelSpanL="5" labelSpanM="5" labelSpanS="5"
+						columnsXL="2" columnsL="2" columnsM="2"
+						singleContainerFullSize="false">
+						<f:content>
+							<Label text="{i18n>lblBatchNo}"/>
+							<Text text="{form>/scan/BATCH_NO}"/>
+							<Label text="{i18n>lblArticle}"/>
+							<Text text="{form>/scan/ARTICLE}"/>
+							<Label text="{i18n>lblDyeset}"/>
+							<Text text="{form>/scan/DYESET}"/>
+							<Label text="{i18n>lblSalesOrder}"/>
+							<Text text="{form>/scan/SALES_ORDER_NO}"/>
+							<Label text="{i18n>lblLotNo}"/>
+							<Text text="{form>/scan/LOT_NO}"/>
+							<Label text="{i18n>lblBeamNo}"/>
+							<Text text="{form>/scan/BEAM_NO}"/>
+							<Label text="{i18n>lblLoomNo}"/>
+							<Text text="{form>/scan/LOOM_NO}"/>
+							<Label text="{i18n>lblLegacyNo}"/>
+							<Text text="{form>/scan/LEGACY_NO}"/>
+							<Label text="{i18n>lblDoffBatchNo}"/>
+							<Text text="{form>/scan/DOFF_BATCHNO}"/>
+							<Label text="{i18n>lblDoffLength}"/>
+							<Text text="{form>/scan/DOFF_LENGTH}"/>
+						</f:content>
+					</f:SimpleForm>
+				</Panel>
+
+				<!-- Right: finishing inputs -->
+				<Panel headerText="{i18n>inputTitle}" class="sapUiTinyMarginBottom">
+					<layoutData>
+						<FlexItemData growFactor="1" baseSize="0%" minWidth="20rem"/>
+					</layoutData>
+					<f:SimpleForm
+						editable="true"
+						layout="ResponsiveGridLayout"
+						labelSpanXL="4" labelSpanL="4" labelSpanM="4" labelSpanS="4"
+						columnsXL="1" columnsL="1" columnsM="1"
+						singleContainerFullSize="false">
+						<f:content>
+							<Label text="{i18n>lblOperator}" required="true"/>
+							<Input
+								id="inpOperator"
+								value="{form>/input/operator}"
+								placeholder="{i18n>phOperator}"
+								maxLength="20"
+								enabled="{form>/inputsEnabled}"/>
+
+							<Label text="{i18n>lblPalate}" required="true"/>
+							<Input
+								id="inpPalate"
+								value="{form>/input/palate}"
+								placeholder="{i18n>phPalate}"
+								maxLength="5"
+								enabled="{form>/inputsEnabled}"/>
+
+							<Label text="{i18n>lblBatcher}" required="true"/>
+							<Input
+								id="inpBatcher"
+								value="{form>/input/batcher}"
+								placeholder="{i18n>phBatcher}"
+								maxLength="10"
+								enabled="{form>/inputsEnabled}"/>
+
+							<Label text="{i18n>lblFinishLength}" required="true"/>
+							<Input
+								id="inpFinishLen"
+								value="{form>/input/finishLength}"
+								type="Number"
+								placeholder="{i18n>phFinishLength}"
+								enabled="{form>/inputsEnabled}"/>
+
+							<Label text="{i18n>lblProcess}" required="true"/>
+							<ComboBox
+								id="cbProcess"
+								selectedKey="{form>/input/workcen}"
+								placeholder="{i18n>phProcess}"
+								enabled="{form>/inputsEnabled}">
+								<core:Item key="ZMUF_01" text="MUZZI SANFOR"/>
+								<core:Item key="ZMSN_01" text="MORRISON SANFOR"/>
+								<core:Item key="ZCIS_01" text="MONFORT SANFOR"/>
+								<core:Item key="ZRFS_01" text="CIBITEX SANFOR"/>
+							</ComboBox>
+						</f:content>
+					</f:SimpleForm>
+				</Panel>
+
+			</HBox>
+		</content>
+	</Page>
+</mvc:View>

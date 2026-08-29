@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Finishing — Sanforizing Entry</title>
+
+	<style>
+		html, body, #content {
+			height: 100%;
+			margin: 0;
+		}
+		/* stretch the root XML view so the Page fills the viewport
+		   (otherwise the Page collapses to its footer height) */
+		#content .sapUiView {
+			height: 100%;
+		}
+		/* simple pulsing "machine running" animation */
+		@keyframes finPulse {
+			0%   { opacity: 1;   transform: scale(1); }
+			50%  { opacity: 0.35; transform: scale(0.82); }
+			100% { opacity: 1;   transform: scale(1); }
+		}
+		.finRunning .sapUiIcon {
+			animation: finPulse 1s ease-in-out infinite;
+			color: #107e3e;
+		}
+
+		/* top-left logo in the header */
+		.finLogo { height: 2rem; margin-right: 0.75rem; }
+
+		/* prominent SAP-themed action toolbar (start/stop, times, save/clear) */
+		.finActionBar.sapMTB {
+			min-height: 3.25rem;
+			padding-top: 0.25rem;
+			padding-bottom: 0.25rem;
+			border-bottom: 3px solid var(--sapButton_Emphasized_Background, #0a6ed1);
+			box-shadow: inset 0 3px 0 0 var(--sapButton_Emphasized_Background, #0a6ed1);
+		}
+		.finActionBar .sapMLabel { font-weight: 700; }
+		.finActionBar .sapMObjectStatus { font-weight: 700; }
+	</style>
+
+	<!-- Served by Flask at /finishing/, so UI5 is loaded from the OpenUI5 CDN
+	     (the app's original bootstrap). To run fully offline, deploy to the
+	     ABAP server or front it with `ui5 serve` and point resourceroots at it. -->
+	<script
+		id="sap-ui-bootstrap"
+		src="https://sdk.openui5.org/1.120.30/resources/sap-ui-core.js"
+		data-sap-ui-theme="sap_horizon"
+		data-sap-ui-resourceroots='{"finishing.sanfor": "./"}'
+		data-sap-ui-oninit="module:sap/ui/core/ComponentSupport"
+		data-sap-ui-compatVersion="edge"
+		data-sap-ui-async="true">
+	</script>
+</head>
+<body class="sapUiBody">
+	<div
+		id="content"
+		class="sapUiSizeCompact"
+		data-sap-ui-component
+		data-name="finishing.sanfor"
+		data-id="container"
+		data-height="100%"
+		data-settings='{"id": "finishingApp"}'>
+	</div>
+</body>
+</html>

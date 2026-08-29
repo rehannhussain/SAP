@@ -1,0 +1,79 @@
+# CLAUDE.md
+
+Guidance for Claude Code (claude.ai/code) when working in this repository.
+
+## What this is
+
+**ZWFN** — a SAP Fiori (SAPUI5 freestyle) shop-floor entry app for the **Finishing
+department's Sanforizing (SNFR)** operation, backed by a small Python Flask API that talks
+to SAP HANA (schema `SAPHANADB`) via `hdbcli`.
+
+Flow: the operator **scans a doff QR** (`DOFF_BATCHNO`) → the screen shows the read-only
+production context → the operator enters finishing values and runs a **machine start/stop
+timer** → on Save one row is inserted into `SAPHANADB.ZFN_FAB_PRD_D`.
+
+This app was migrated out of the ZMDASHBOARD2 meter-reading project into its own repo.
+
+## Run / develop
+
+**No build step, no Node toolchain.** Python is the runtime and the web server.
+
+```bash
+pip install -r server/requirements.txt      # flask + hdbcli
+cp server/.env.example server/.env           # then fill in real HANA credentials
+python server/app.py                         # serves UI + API at http://localhost:8000
+```
+
+- `PORT` (env / `.env`) changes the port; default `8000`.
+- Flask runs with `debug=True` (Werkzeug reloader → two python processes). When
+  restarting, make sure **port 8000 is free**; kill lingering `server/app.py` processes.
+- No tests or linter configured.
+
+## Architecture
+
+**Single origin, no CORS.** `server/app.py` serves the static SAPUI5 app from `../webapp`
+at `/` *and* the JSON API under `/api/*`. The front end uses **relative** fetch paths
+(`fetch("api/finishing/scan")`) — never hardcode an origin/port.
+
+**Back end** (`server/app.py`, Flask + `hdbcli`), two endpoints:
+- `GET /api/finishing/scan?doff=<DOFF_BATCHNO>` — parameterized join of `ZWV_DOF_D` /
+  `ZWV_DOF_DD2` (`MANDT='900'`); returns the single batch row or `404`.
+- `POST /api/finishing/records` — inserts one run into `ZFN_FAB_PRD_D`. Server generates
+  `DOCID = MAX(TO_BIGINT(DOCID))+1` (guarded against non-numeric ids, `MANDT='900'`),
+  zero-padded to 10, retrying once on a unique-key clash (errorcode 301). Machine duration
+  is recomputed server-side from the client start/stop timestamps: `TIMEUP` = total
+  **seconds**, `TIMEMINUTES` = total **minutes**. Fixed values: `OPERATION='SNFR'`,
+  `FINISH_TYPE='FINISH'`, and the `ZWFN` TCODE stored in `REMARKS` (there is no TCODE
+  column). `USERIN`/`USERUP`/`OPERATOR` = the entered operator. Only ~32 business columns
+  are listed; every other column of the table is NOT NULL but has a DB default.
+
+**Front end** (`webapp/`, namespace `finishing.sanfor`) — plain `fetch()` (no OData):
+- `index.html` → `Component.js` → `manifest.json` (`rootView` = `view/FinishingForm`).
+- Compact single-screen iPad layout, theme `sap_horizon`: a branded header with a
+  **top-left logo**, a **prominent** action toolbar (Start/Stop + machine times +
+  Save/Clear), and **Batch Details beside Finishing Entry**. Verified no-scroll at
+  1024×768 and 768×1024.
+- One ComboBox drives two columns: its **key = `MACHINE_WORKCEN`** code and its
+  **text = `PROCESS_TYPE`** name (`ZMUF_01`=MUZZI, `ZMSN_01`=MORRISON, `ZCIS_01`=MONFORT,
+  `ZRFS_01`=CIBITEX SANFOR).
+
+## Conventions & gotchas
+
+- **UI5 is loaded from the OpenUI5 CDN** (`https://sdk.openui5.org/1.120.30/resources/...`)
+  because the page is served directly by Flask. Only specific 1.120.x patches are hosted
+  (e.g. `.28`/`.30`, **not** `.0`); a bad pin 404s and the page renders blank. For a fully
+  offline floor, deploy to the ABAP gateway or front it with `ui5 serve`.
+- **`webapp/index.html` has a load-bearing height fix** (`html,body,#content` +
+  `#content .sapUiView` at `height:100%` plus `data-height="100%"`); removing it renders
+  the page blank. It also carries the machine-running keyframes and the `.finActionBar`
+  toolbar styling (uses SAP theme CSS vars with hex fallbacks).
+- **Logo is a placeholder** — `webapp/img/logo.svg`. Replace it with the licensed
+  SAP/company asset (same path, or repoint the `Image` src in the view).
+- **UI5 caches XML views aggressively.** After editing a `.view.xml`, hard-refresh
+  (Ctrl+F5). XML comments must not contain `--` (double hyphen) or the view fails to parse.
+- The `Component-preload.js` 404 in the console is expected (no optimized UI5 build).
+- **Secrets:** only `server/.env` (gitignored) holds real credentials; keep
+  `server/.env.example` as placeholders.
+- **HANA write grant:** the `ZMSQL` DB user has schema-wide SELECT but per-table INSERT.
+  Inserts into `ZFN_FAB_PRD_D` fail with HANA **error 258 "insufficient privilege"** until
+  a DBA runs `GRANT INSERT ON SAPHANADB.ZFN_FAB_PRD_D TO ZMSQL;`.

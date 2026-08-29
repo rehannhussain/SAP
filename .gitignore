@@ -1,6 +1,10 @@
 # Secrets — never commit real HANA credentials
 server/.env
 
+# Self-signed TLS cert for the HTTPS/iPad-camera dev server
+server/cert.pem
+server/key.pem
+
 # Python
 __pycache__/
 *.py[cod]

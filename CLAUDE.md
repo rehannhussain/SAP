@@ -56,6 +56,30 @@ at `/` *and* the JSON API under `/api/*`. The front end uses **relative** fetch 
 - One ComboBox drives two columns: its **key = `MACHINE_WORKCEN`** code and its
   **text = `PROCESS_TYPE`** name (`ZMUF_01`=MUZZI, `ZMSN_01`=MORRISON, `ZCIS_01`=MONFORT,
   `ZRFS_01`=CIBITEX SANFOR).
+- **Camera QR scan (iPad):** a *Scan QR* button opens the rear camera in a dialog and
+  decodes with **jsQR** (vendored locally at `webapp/lib/jsQR.js`, MIT, loaded via a plain
+  `<script>` in `index.html`; Safari has no `BarcodeDetector`). The controller draws video
+  frames to a canvas and runs `jsQR` per `requestAnimationFrame`; on a hit it fills the
+  scan field and runs the normal lookup. Camera errors (permission/insecure context) are
+  caught and surfaced as a MessageBox — no crash, and the handheld-scanner / type path
+  still works.
+
+## HTTPS (required for the iPad camera)
+
+Safari blocks `getUserMedia` over plain `http://` on a LAN IP, so the camera scan only
+works over HTTPS. Run with `USE_HTTPS=true` (env or `.env`): `server/app.py` uses
+`server/cert.pem` + `server/key.pem` if present, else a throwaway **adhoc** cert
+(needs the `cryptography` package; a new cert each restart, so the iPad re-accepts the
+warning every time). For a stable cert including your LAN IP:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+  -keyout server/key.pem -out server/cert.pem -subj "/CN=zwfn-finishing" \
+  -addext "subjectAltName=IP:<YOUR_LAN_IP>,IP:127.0.0.1,DNS:localhost"
+```
+
+Then on the iPad open `https://<host-lan-ip>:8000`, accept the self-signed warning once,
+and allow camera access. `cert.pem`/`key.pem` are gitignored.
 
 ## Conventions & gotchas
 

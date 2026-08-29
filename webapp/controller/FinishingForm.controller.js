@@ -3,8 +3,11 @@ sap.ui.define([
 	"sap/ui/model/json/JSONModel",
 	"sap/ui/core/library",
 	"sap/m/MessageToast",
-	"sap/m/MessageBox"
-], function (Controller, JSONModel, coreLibrary, MessageToast, MessageBox) {
+	"sap/m/MessageBox",
+	"sap/m/Dialog",
+	"sap/m/Button",
+	"sap/ui/core/HTML"
+], function (Controller, JSONModel, coreLibrary, MessageToast, MessageBox, Dialog, Button, HTML) {
 	"use strict";
 
 	var ValueState = coreLibrary.ValueState;
@@ -91,6 +94,115 @@ sap.ui.define([
 					oBtn.setBusy(false);
 					MessageBox.error(this._t("msgSaveFailed"));
 				}.bind(this));
+		},
+
+		// ----- Camera QR scan (iPad Safari) ---------------------------------
+
+		/**
+		 * Opens the rear camera in a dialog and decodes a QR with jsQR. On a hit
+		 * the value is dropped into the scan field and the normal lookup runs.
+		 */
+		onScanQr: function () {
+			// getUserMedia needs a secure context (HTTPS or localhost). On a real
+			// iPad reaching this server over the LAN by http:// the camera is
+			// blocked by Safari — tell the operator how to fix it.
+			if (!window.jsQR) {
+				MessageBox.error(this._t("errQrLib"));
+				return;
+			}
+			if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+				MessageBox.warning(this._t("errCameraContext"));
+				return;
+			}
+
+			if (!this._oScanDialog) {
+				this._oScanHtml = new HTML({
+					content:
+						"<div style='text-align:center'>" +
+						"<video id='finQrVideo' autoplay muted playsinline " +
+						"style='width:100%;max-height:60vh;background:#000;border-radius:.5rem'></video>" +
+						"<canvas id='finQrCanvas' style='display:none'></canvas>" +
+						"</div>"
+				});
+				this._oScanDialog = new Dialog({
+					title: this._t("scanQrTitle"),
+					contentWidth: "32rem",
+					stretchOnPhone: true,
+					content: [this._oScanHtml],
+					endButton: new Button({
+						text: this._t("btnCancel"),
+						press: function () { this._oScanDialog.close(); }.bind(this)
+					}),
+					afterClose: this._stopCamera.bind(this)
+				});
+				this.getView().addDependent(this._oScanDialog);
+			}
+
+			this._oScanDialog.open();
+			// Start the stream after the video element is in the DOM.
+			setTimeout(this._startCamera.bind(this), 0);
+		},
+
+		_startCamera: function () {
+			var video = document.getElementById("finQrVideo");
+			if (!video) { return; }
+			navigator.mediaDevices.getUserMedia({
+				audio: false,
+				video: { facingMode: { ideal: "environment" } }
+			}).then(function (stream) {
+				this._mediaStream = stream;
+				video.setAttribute("playsinline", "");
+				video.srcObject = stream;
+				var play = video.play();
+				if (play && play.catch) { play.catch(function () {}); }
+				this._scanning = true;
+				this._decodeTick();
+			}.bind(this)).catch(function (err) {
+				this._oScanDialog.close();
+				var msg = (err && (err.name === "NotAllowedError" || err.name === "SecurityError"))
+					? this._t("errCameraDenied") : this._t("errCameraContext");
+				MessageBox.warning(msg);
+			}.bind(this));
+		},
+
+		_decodeTick: function () {
+			if (!this._scanning) { return; }
+			var video = document.getElementById("finQrVideo");
+			var canvas = document.getElementById("finQrCanvas");
+			if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
+				this._rafId = window.requestAnimationFrame(this._decodeTick.bind(this));
+				return;
+			}
+			var w = video.videoWidth, h = video.videoHeight;
+			canvas.width = w;
+			canvas.height = h;
+			var ctx = canvas.getContext("2d");
+			ctx.drawImage(video, 0, 0, w, h);
+			var img = ctx.getImageData(0, 0, w, h);
+			var code = window.jsQR(img.data, w, h, { inversionAttempts: "dontInvert" });
+			if (code && code.data) {
+				this._scanning = false;
+				var sValue = String(code.data).trim();
+				this.getView().getModel("form").setProperty("/scanText", sValue);
+				this._oScanDialog.close();
+				this.onScan();
+				return;
+			}
+			this._rafId = window.requestAnimationFrame(this._decodeTick.bind(this));
+		},
+
+		_stopCamera: function () {
+			this._scanning = false;
+			if (this._rafId) {
+				window.cancelAnimationFrame(this._rafId);
+				this._rafId = null;
+			}
+			if (this._mediaStream) {
+				this._mediaStream.getTracks().forEach(function (t) { t.stop(); });
+				this._mediaStream = null;
+			}
+			var video = document.getElementById("finQrVideo");
+			if (video) { video.srcObject = null; }
 		},
 
 		// ----- Machine start / stop -----------------------------------------

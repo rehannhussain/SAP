@@ -24,6 +24,13 @@
 						submit=".onScan"
 						width="22rem"/>
 					<Button
+						id="btnScanQr"
+						text="{i18n>btnScanQr}"
+						icon="sap-icon://bar-code"
+						tooltip="{i18n>btnScanQr}"
+						enabled="{= !${form>/running} &amp;&amp; !${form>/stopped} }"
+						press=".onScanQr"/>
+					<Button
 						id="btnLoad"
 						text="{i18n>btnLoad}"
 						type="Emphasized"

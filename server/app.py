@@ -275,5 +275,27 @@ def api_finishing_create():
         conn.close()
 
 
+def _ssl_context():
+    """
+    HTTPS is required for the iPad camera scan (Safari blocks getUserMedia over
+    plain http:// on a LAN address). Enable with USE_HTTPS=true:
+      - if server/cert.pem + server/key.pem exist, use them (stable, recommended);
+      - otherwise fall back to a throwaway 'adhoc' cert (new cert each restart, so
+        the iPad must re-accept the warning every time).
+    Generate a stable self-signed cert (include your LAN IP) with, e.g.:
+      openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+        -keyout server/key.pem -out server/cert.pem -subj "/CN=zwfn-finishing" \
+        -addext "subjectAltName=IP:<YOUR_LAN_IP>,IP:127.0.0.1,DNS:localhost"
+    """
+    if os.environ.get("USE_HTTPS", "false").lower() != "true":
+        return None
+    here = os.path.dirname(__file__)
+    cert = os.path.join(here, "cert.pem")
+    key = os.path.join(here, "key.pem")
+    if os.path.exists(cert) and os.path.exists(key):
+        return (cert, key)
+    return "adhoc"
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, debug=True)
+    app.run(host="0.0.0.0", port=PORT, debug=True, ssl_context=_ssl_context())

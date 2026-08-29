@@ -41,7 +41,10 @@
 		.finActionBar .sapMObjectStatus { font-weight: 700; }
 	</style>
 
-	<!-- Served by Flask at /finishing/, so UI5 is loaded from the OpenUI5 CDN
+	<!-- Local QR decoder (jsQR, MIT) for the iPad camera scan button. -->
+	<script src="lib/jsQR.js"></script>
+
+	<!-- Served directly by Flask, so UI5 is loaded from the OpenUI5 CDN
 	     (the app's original bootstrap). To run fully offline, deploy to the
 	     ABAP server or front it with `ui5 serve` and point resourceroots at it. -->
 	<script

@@ -102,11 +102,45 @@ _FIN_SCAN_FIELDS = (
 )
 
 
+_FIN_SCAN_SELECT = (
+    "SELECT A.BATCH_NO, A.ARTICLE, A.DYESET, A.SALES_ORDER_NO, A.LOT_NO, "
+    "A.BEAM_NO, A.LOOM_NO, A.LEGACY_NO, B.DOFF_BATCHNO, B.DOFF_LENGTH "
+    "FROM SAPHANADB.ZWV_DOF_D A "
+    "INNER JOIN SAPHANADB.ZWV_DOF_DD2 B ON A.DOCID = B.DOCID "
+    "WHERE A.MANDT = ? AND "
+)
+
+
+def _run_scan(conn, condition, value, limit=2):
+    """Run the scan SELECT with a variable DOFF_BATCHNO condition. Returns records."""
+    cur = conn.cursor()
+    cur.execute(_FIN_SCAN_SELECT + condition + f" LIMIT {int(limit)}", [FIN_MANDT, value])
+    rows = cur.fetchall()
+    cur.close()
+    return [
+        {col: ("" if r[i] is None else str(r[i])) for i, col in enumerate(_FIN_SCAN_FIELDS)}
+        for r in rows
+    ]
+
+
+def _clean_scan(raw):
+    """
+    Normalize a scanned code. Handheld scanners give the plain DOFF_BATCHNO, but
+    some QR labels come formatted with dashes and a trailing word, e.g.
+    '261042-528-1446-01 TRIAL'. Keep only the code token (drop ' TRIAL' etc.) and
+    upper-case it. Dashes are handled by the lookup, not stripped here.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    return s.split()[0].upper()          # first whitespace-separated token
+
+
 @app.get("/api/finishing/scan")
 def api_finishing_scan():
     """Look up doff production context for a scanned DOFF_BATCHNO."""
-    doff = (request.args.get("doff") or "").strip()
-    if not doff:
+    base = _clean_scan(request.args.get("doff"))
+    if not base:
         return jsonify({"error": "Missing doff batch number."}), 400
 
     try:
@@ -115,22 +149,26 @@ def api_finishing_scan():
         return jsonify({"error": str(exc)}), 500
 
     try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT A.BATCH_NO, A.ARTICLE, A.DYESET, A.SALES_ORDER_NO, A.LOT_NO, "
-            "A.BEAM_NO, A.LOOM_NO, A.LEGACY_NO, B.DOFF_BATCHNO, B.DOFF_LENGTH "
-            "FROM SAPHANADB.ZWV_DOF_D A "
-            "INNER JOIN SAPHANADB.ZWV_DOF_DD2 B ON A.DOCID = B.DOCID "
-            "WHERE A.MANDT = ? AND B.DOFF_BATCHNO = ?",
-            [FIN_MANDT, doff],
-        )
-        row = cur.fetchone()
-        cur.close()
-        if not row:
+        # 1) Exact match on the code with any dashes removed (normal scanner output,
+        #    incl. a full code that happened to carry a ' TRIAL' suffix).
+        records = _run_scan(conn, "B.DOFF_BATCHNO = ?", base.replace("-", ""))
+
+        # 2) Dashed 'trial' label: the QR omits the loom code that sits between the
+        #    lot and the doff tail, so match lot + wildcard + tail. Only accept it
+        #    when it resolves to exactly one batch (never guess between several).
+        if not records and "-" in base:
+            parts = [p for p in base.split("-") if p]
+            if len(parts) >= 2:
+                pattern = parts[0] + "%" + "".join(parts[1:])
+                matches = _run_scan(conn, "B.DOFF_BATCHNO LIKE ?", pattern, limit=2)
+                if len(matches) > 1:
+                    return jsonify({"error": "This QR matches more than one batch. "
+                                             "Scan the full code or type it manually."}), 409
+                records = matches
+
+        if not records:
             return jsonify({"error": "Batch not found for the scanned code."}), 404
-        record = {col: ("" if row[i] is None else str(row[i]))
-                  for i, col in enumerate(_FIN_SCAN_FIELDS)}
-        return jsonify(record)
+        return jsonify(records[0])
     except dbapi.Error as exc:
         return jsonify({"error": str(exc)}), 500
     finally:

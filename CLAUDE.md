@@ -36,8 +36,13 @@ at `/` *and* the JSON API under `/api/*`. The front end uses **relative** fetch 
 (`fetch("api/finishing/scan")`) — never hardcode an origin/port.
 
 **Back end** (`server/app.py`, Flask + `hdbcli`), two endpoints:
-- `GET /api/finishing/scan?doff=<DOFF_BATCHNO>` — parameterized join of `ZWV_DOF_D` /
-  `ZWV_DOF_DD2` (`MANDT='900'`); returns the single batch row or `404`.
+- `GET /api/finishing/scan?doff=<code>` — parameterized join of `ZWV_DOF_D` /
+  `ZWV_DOF_DD2` (`MANDT='900'`); returns the single batch row or `404`. The scan value is
+  normalized (`_clean_scan`): the first whitespace token is kept (drops a trailing label
+  like `TRIAL`). It first tries an **exact** match (dashes removed); if that misses and the
+  code is dashed (e.g. `261042-528-1446-01`, a QR that omits the `KT3L…` loom code baked
+  into `DOFF_BATCHNO`), it matches **`lot% + tail`** (`261042%528144601`) and accepts it
+  **only when exactly one** batch matches (else `409`, never a wrong guess).
 - `POST /api/finishing/records` — inserts one run into `ZFN_FAB_PRD_D`. Server generates
   `DOCID = MAX(TO_BIGINT(DOCID))+1` (guarded against non-numeric ids, `MANDT='900'`),
   zero-padded to 10, retrying once on a unique-key clash (errorcode 301). Machine duration

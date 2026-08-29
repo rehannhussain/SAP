@@ -16,6 +16,7 @@ Run:  python server/app.py   ->   http://localhost:8000
 """
 
 import os
+import re
 from datetime import datetime
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -123,24 +124,33 @@ def _run_scan(conn, condition, value, limit=2):
     ]
 
 
-def _clean_scan(raw):
+def _scan_forms(raw):
     """
-    Normalize a scanned code. Handheld scanners give the plain DOFF_BATCHNO, but
-    some QR labels come formatted with dashes and a trailing word, e.g.
-    '261042-528-1446-01 TRIAL'. Keep only the code token (drop ' TRIAL' etc.) and
-    upper-case it. Dashes are handled by the lookup, not stripped here.
+    Turn a raw scan into (compact, segments).
+
+    Handheld scanners give the plain DOFF_BATCHNO, but some QR labels come
+    formatted with separators and a trailing label, e.g. '261042-528-1446-01
+    TRIAL'. We drop the trailing label (first whitespace-delimited token), then:
+      - compact  = the token with every separator removed ('261042528144601'),
+                   used for a direct exact match of a full code;
+      - segments = the token split on any run of non-alphanumerics
+                   (['261042','528','1446','01']), used to rebuild a
+                   lot% + tail pattern when the QR omits the loom code.
     """
     s = (raw or "").strip()
     if not s:
-        return ""
-    return s.split()[0].upper()          # first whitespace-separated token
+        return "", []
+    token = s.split()[0].upper()
+    compact = re.sub(r"[^A-Z0-9]", "", token)
+    segments = [p for p in re.split(r"[^A-Z0-9]+", token) if p]
+    return compact, segments
 
 
 @app.get("/api/finishing/scan")
 def api_finishing_scan():
     """Look up doff production context for a scanned DOFF_BATCHNO."""
-    base = _clean_scan(request.args.get("doff"))
-    if not base:
+    compact, segments = _scan_forms(request.args.get("doff"))
+    if not compact:
         return jsonify({"error": "Missing doff batch number."}), 400
 
     try:
@@ -149,22 +159,20 @@ def api_finishing_scan():
         return jsonify({"error": str(exc)}), 500
 
     try:
-        # 1) Exact match on the code with any dashes removed (normal scanner output,
-        #    incl. a full code that happened to carry a ' TRIAL' suffix).
-        records = _run_scan(conn, "B.DOFF_BATCHNO = ?", base.replace("-", ""))
+        # 1) Exact match on the full code with separators removed (normal scanner
+        #    output, incl. a full code that carried a trailing ' TRIAL' label).
+        records = _run_scan(conn, "B.DOFF_BATCHNO = ?", compact)
 
-        # 2) Dashed 'trial' label: the QR omits the loom code that sits between the
-        #    lot and the doff tail, so match lot + wildcard + tail. Only accept it
-        #    when it resolves to exactly one batch (never guess between several).
-        if not records and "-" in base:
-            parts = [p for p in base.split("-") if p]
-            if len(parts) >= 2:
-                pattern = parts[0] + "%" + "".join(parts[1:])
-                matches = _run_scan(conn, "B.DOFF_BATCHNO LIKE ?", pattern, limit=2)
-                if len(matches) > 1:
-                    return jsonify({"error": "This QR matches more than one batch. "
-                                             "Scan the full code or type it manually."}), 409
-                records = matches
+        # 2) Separated 'trial' label: the QR omits the loom code that sits between
+        #    the lot and the doff tail, so match lot + wildcard + tail. Only accept
+        #    it when it resolves to exactly one batch (never guess between several).
+        if not records and len(segments) >= 2:
+            pattern = segments[0] + "%" + "".join(segments[1:])
+            matches = _run_scan(conn, "B.DOFF_BATCHNO LIKE ?", pattern, limit=2)
+            if len(matches) > 1:
+                return jsonify({"error": "This QR matches more than one batch. "
+                                         "Scan the full code or type it manually."}), 409
+            records = matches
 
         if not records:
             return jsonify({"error": "Batch not found for the scanned code."}), 404

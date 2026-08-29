@@ -5,6 +5,11 @@ server/.env
 server/cert.pem
 server/key.pem
 
+# Locally-hosted OpenUI5 runtime (large third-party framework; fetched once,
+# not source). Re-create with the download+extract steps in CLAUDE.md.
+webapp/resources/
+_ui5dl/
+
 # Python
 __pycache__/
 *.py[cod]

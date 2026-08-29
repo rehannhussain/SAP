@@ -83,10 +83,18 @@ and allow camera access. `cert.pem`/`key.pem` are gitignored.
 
 ## Conventions & gotchas
 
-- **UI5 is loaded from the OpenUI5 CDN** (`https://sdk.openui5.org/1.120.30/resources/...`)
-  because the page is served directly by Flask. Only specific 1.120.x patches are hosted
-  (e.g. `.28`/`.30`, **not** `.0`); a bad pin 404s and the page renders blank. For a fully
-  offline floor, deploy to the ABAP gateway or front it with `ui5 serve`.
+- **UI5 runtime is hosted locally** at `webapp/resources/` (OpenUI5 **1.120.30**), served by
+  Flask, so `index.html` bootstraps from `src="resources/sap-ui-core.js"`. This loads at LAN
+  speed and needs **no internet** — first load ~1 s on the LAN (~8 MB uncached) vs many
+  seconds from the public CDN. `webapp/resources/` is **gitignored** (~540 MB, third-party,
+  not source). To fall back to the CDN, set the bootstrap `src` to
+  `https://sdk.openui5.org/1.120.30/resources/sap-ui-core.js` (only specific 1.120.x patches
+  are hosted — `.28`/`.30`, not `.0`).
+  **Re-create the local runtime** (after a fresh clone or a version bump):
+  ```bash
+  curl -sL -o /tmp/ui5.zip https://github.com/SAP/openui5/releases/download/1.120.30/openui5-runtime-1.120.30.zip
+  python -c "import zipfile; z=zipfile.ZipFile('/tmp/ui5.zip'); z.extractall('webapp', [n for n in z.namelist() if n.startswith('resources/') and not n.endswith('/')])"
+  ```
 - **`webapp/index.html` has a load-bearing height fix** (`html,body,#content` +
   `#content .sapUiView` at `height:100%` plus `data-height="100%"`); removing it renders
   the page blank. It also carries the machine-running keyframes and the `.finActionBar`

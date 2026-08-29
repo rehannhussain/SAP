@@ -44,12 +44,14 @@
 	<!-- Local QR decoder (jsQR, MIT) for the iPad camera scan button. -->
 	<script src="lib/jsQR.js"></script>
 
-	<!-- Served directly by Flask, so UI5 is loaded from the OpenUI5 CDN
-	     (the app's original bootstrap). To run fully offline, deploy to the
-	     ABAP server or front it with `ui5 serve` and point resourceroots at it. -->
+	<!-- UI5 is loaded from the OpenUI5 runtime hosted locally by Flask
+	     (webapp/resources/, gitignored). This serves at LAN speed and works
+	     with no internet. See CLAUDE.md for how to re-download the runtime.
+	     To fall back to the public CDN, set src to
+	     https://sdk.openui5.org/1.120.30/resources/sap-ui-core.js -->
 	<script
 		id="sap-ui-bootstrap"
-		src="https://sdk.openui5.org/1.120.30/resources/sap-ui-core.js"
+		src="resources/sap-ui-core.js"
 		data-sap-ui-theme="sap_horizon"
 		data-sap-ui-resourceroots='{"finishing.sanfor": "./"}'
 		data-sap-ui-oninit="module:sap/ui/core/ComponentSupport"

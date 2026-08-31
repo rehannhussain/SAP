@@ -1,2 +1,3 @@
 flask>=3.0
 hdbcli>=2.19
+pyodbc>=5.0        # KT SQL Server mirror (needs the "ODBC Driver 17 for SQL Server")

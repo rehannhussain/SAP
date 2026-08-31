@@ -346,10 +346,13 @@ sap.ui.define([
 						MessageBox.error(r.body && r.body.error ? r.body.error : this._t("msgSaveFailed"));
 						return;
 					}
-					MessageBox.success(
-						this._t("msgSaved", [r.body && r.body.docid]),
-						{ title: this._t("msgSavedTitle"), onClose: this.onReset.bind(this) }
-					);
+					var sMsg = this._t("msgSaved", [r.body && r.body.docid]);
+					var oOpts = { title: this._t("msgSavedTitle"), onClose: this.onReset.bind(this) };
+					if (r.body && r.body.warning) {
+						MessageBox.warning(sMsg + "\n\n" + r.body.warning, oOpts);
+					} else {
+						MessageBox.success(sMsg, oOpts);
+					}
 				}.bind(this))
 				.catch(function () {
 					oBtn.setBusy(false);

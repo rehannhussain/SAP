@@ -22,6 +22,11 @@ from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory
 from hdbcli import dbapi
 
+try:
+    import pyodbc                       # optional: KT SQL Server mirror
+except ImportError:
+    pyodbc = None
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -53,6 +58,22 @@ HANA = {
 PORT = int(os.environ.get("PORT", "8000"))
 # HANA connect/communication timeout in ms (fail fast when SAP is down).
 CONNECT_TIMEOUT_MS = int(os.environ.get("HANA_TIMEOUT_MS", "5000"))
+
+# KT SQL Server mirror (SAP_FinishingDetail). Best-effort: a failure here never
+# blocks the HANA save. Disable with KT_ENABLED=false.
+KT = {
+    "server": os.environ.get("KT_SERVER", ""),
+    "database": os.environ.get("KT_DATABASE", ""),
+    "uid": os.environ.get("KT_UID", ""),
+    "pwd": os.environ.get("KT_PWD", ""),
+    "driver": os.environ.get("KT_DRIVER", "ODBC Driver 17 for SQL Server"),
+}
+KT_TIMEOUT = int(os.environ.get("KT_TIMEOUT", "8"))
+KT_ENABLED = (
+    os.environ.get("KT_ENABLED", "true").lower() == "true"
+    and pyodbc is not None
+    and bool(KT["server"])
+)
 
 WEBAPP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webapp"))
 
@@ -343,6 +364,75 @@ def _dec(value):
         return 0
 
 
+# ---------------------------------------------------------------------------
+# KT SQL Server mirror (SAP_FinishingDetail)
+# ---------------------------------------------------------------------------
+
+def _kt_conn():
+    return pyodbc.connect(
+        "DRIVER={%s};SERVER=%s;DATABASE=%s;UID=%s;PWD=%s;"
+        "MARS_Connection=yes;TrustServerCertificate=yes;"
+        % (KT["driver"], KT["server"], KT["database"], KT["uid"], KT["pwd"]),
+        timeout=KT_TIMEOUT,
+    )
+
+
+def _kt_dye_stop(cur, lot_no, legacy_no):
+    """DYE_CHK from SIZING: 1 when ZSIZE_PRD_D.DYES_STOP = 'YES' for the lot+legacy_no, else 0."""
+    lot_no = (lot_no or "").strip()
+    legacy_no = (legacy_no or "").strip()
+    if not lot_no or not legacy_no:
+        return 0
+    cur.execute(
+        "SELECT d.DYES_STOP FROM SAPHANADB.ZSIZE_PRD_M m "
+        "INNER JOIN SAPHANADB.ZSIZE_PRD_D d ON m.DOCID = d.DOCID "
+        "WHERE m.MANDT = ? AND m.LOT_NO = ? AND d.LEGACY_NO = ? LIMIT 1",
+        [FIN_MANDT, lot_no, legacy_no],
+    )
+    row = cur.fetchone()
+    return 1 if (row and str(row[0]).strip().upper() == "YES") else 0
+
+
+def _kt_upsert(v):
+    """Insert/update one row in KT.SAP_FinishingDetail (DOCID + DOCID_DTL key).
+    Fabric_Code is computed by the SQL Server function from the cleaned article."""
+    conn = _kt_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM SAP_FinishingDetail WHERE DOCID = ? AND DOCID_DTL = ?",
+            v["docid"], v["docid_dtl"],
+        )
+        exists = cur.fetchone()[0] > 0
+        if exists:
+            cur.execute(
+                "UPDATE SAP_FinishingDetail SET "
+                "Article=?, LotNo=?, LoomNo=?, BeamNo=?, "
+                "Fabric_Code=dbo.Func_FAB_WeavingCode_FabricCode(?), PalletNo=?, Dyeing_Code=?, "
+                "Dye_Stop=?, Finish_Length=?, DOFF_BATCH_NO=?, REFINISH_DOCID=?, "
+                "PRDDATE=CONVERT(datetime, ?, 112) "
+                "WHERE DOCID=? AND DOCID_DTL=?",
+                v["article"], v["lotno"], v["loomno"], v["beamno"], v["article"], v["palletno"],
+                v["dyeing_code"], v["dye_stop"], v["finish_length"], v["doff_batch_no"],
+                v["refinish_docid"], v["prddate"], v["docid"], v["docid_dtl"],
+            )
+        else:
+            cur.execute(
+                "INSERT INTO SAP_FinishingDetail "
+                "(Article, LotNo, LoomNo, BeamNo, Fabric_Code, DOCID, DOCID_DTL, PalletNo, "
+                "Dyeing_Code, Dye_Stop, Finish_Length, DOFF_BATCH_NO, REFINISH_DOCID, PRDDATE) "
+                "VALUES (?, ?, ?, ?, dbo.Func_FAB_WeavingCode_FabricCode(?), ?, ?, ?, "
+                "?, ?, ?, ?, ?, CONVERT(datetime, ?, 112))",
+                v["article"], v["lotno"], v["loomno"], v["beamno"], v["article"], v["docid"],
+                v["docid_dtl"], v["palletno"], v["dyeing_code"], v["dye_stop"], v["finish_length"],
+                v["doff_batch_no"], v["refinish_docid"], v["prddate"],
+            )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+
 def _fin_insert(conn, scan, inp, started, stopped):
     """Insert one finished Sanfor run: header (M) + detail (D) under one shared
     DOCID, in a single transaction. Returns the generated DOCID string."""
@@ -363,6 +453,7 @@ def _fin_insert(conn, scan, inp, started, stopped):
     docid = str(_fin_next_docid(cur)).zfill(10)
     docid_dtl = str(_fin_next_docid_dtl(cur, docid)).zfill(10)
     aufnr, out_matnr, out_uom = _fin_order_lookup(cur, scan.get("LOT_NO", ""))
+    dye_chk = _kt_dye_stop(cur, scan.get("LOT_NO", ""), scan.get("LEGACY_NO", ""))
 
     # --- header: ZFN_FAB_PRD_M -------------------------------------------
     m_params = [
@@ -436,7 +527,23 @@ def _fin_insert(conn, scan, inp, started, stopped):
 
     conn.commit()
     cur.close()
-    return docid
+    # Values for the KT SQL Server mirror (BeamNo <- LEGACY_NO, per the ABAP).
+    kt = {
+        "docid": docid,
+        "docid_dtl": docid_dtl,
+        "article": article,
+        "lotno": scan.get("LOT_NO", ""),
+        "loomno": scan.get("LOOM_NO", ""),
+        "beamno": scan.get("LEGACY_NO", ""),
+        "palletno": inp["palate"],
+        "dyeing_code": scan.get("DYESET", ""),
+        "dye_stop": dye_chk,
+        "finish_length": int(inp["finishLength"]),
+        "doff_batch_no": scan.get("DD_BATCH_NO", ""),
+        "refinish_docid": "",
+        "prddate": doc_date,
+    }
+    return {"docid": docid, "kt": kt}
 
 
 @app.post("/api/finishing/records")
@@ -472,11 +579,12 @@ def api_finishing_create():
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 500
 
+    result = None
     try:
         for attempt in range(2):
             try:
-                docid = _fin_insert(conn, scan, clean, started, stopped)
-                return jsonify({"docid": docid}), 201
+                result = _fin_insert(conn, scan, clean, started, stopped)
+                break
             except dbapi.Error as exc:
                 try:
                     conn.rollback()          # discard the partial header+detail
@@ -487,6 +595,20 @@ def api_finishing_create():
                 return jsonify({"error": str(exc)}), 500
     finally:
         conn.close()
+
+    if result is None:
+        return jsonify({"error": "Could not generate a unique document id."}), 500
+
+    # HANA (SAP) is saved. Mirror to the KT SQL Server best-effort — a failure
+    # here never undoes the SAP save; it just warns the operator.
+    resp = {"docid": result["docid"]}
+    if KT_ENABLED:
+        try:
+            _kt_upsert(result["kt"])
+        except Exception as exc:
+            app.logger.warning("KT sync failed for DOCID %s: %s", result["docid"], exc)
+            resp["warning"] = "Saved in SAP, but the KT SQL Server sync failed: " + str(exc)
+    return jsonify(resp), 201
 
 
 def _ssl_context():

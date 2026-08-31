@@ -129,12 +129,14 @@ FIN_MANDT = "900"
 _FIN_SCAN_FIELDS = (
     "BATCH_NO", "ARTICLE", "DYESET", "SALES_ORDER_NO", "LOT_NO",
     "BEAM_NO", "LOOM_NO", "LEGACY_NO", "DOFF_BATCHNO", "DOFF_LENGTH", "DD_BATCH_NO",
+    "DOFF_DOCID", "DOFF_DOCID_DTL",
 )
 
 
 _FIN_SCAN_SELECT = (
     "SELECT A.BATCH_NO, A.ARTICLE, A.DYESET, A.SALES_ORDER_NO, A.LOT_NO, "
-    "A.BEAM_NO, A.LOOM_NO, A.LEGACY_NO, B.DOFF_BATCHNO, B.DOFF_LENGTH, B.BATCH_NO "
+    "A.BEAM_NO, A.LOOM_NO, A.LEGACY_NO, B.DOFF_BATCHNO, B.DOFF_LENGTH, B.BATCH_NO, "
+    "B.DOCID, B.DOCID_DTL "
     "FROM SAPHANADB.ZWV_DOF_D A "
     "INNER JOIN SAPHANADB.ZWV_DOF_DD2 B ON A.DOCID = B.DOCID "
     "WHERE A.MANDT = ? AND "
@@ -215,13 +217,13 @@ def api_finishing_scan():
 # Column order for the ZFN_FAB_PRD_D insert. Every other (omitted) column is
 # NOT NULL but carries a DB default, so listing only these is safe.
 _FIN_COLUMNS = (
-    "MANDT, DOCID, DYESET_CD, ARTICLE, LOTNO, LEGACY_NO, OPERATOR, USERIN, USERUP, "
-    "PALLATE_NO, BATCHER_NO, FINISH_LENGTH, PROCESS_TYPE, MACHINE_WORKCEN, OPERATION, "
-    "FINISH_TYPE, REMARKS, DATEIN, TIMEIN, START_DATE, START_TIME, DATEUP, STOP_DATE, "
-    "STOP_TIME, TIMEUP, TIMEMINUTES, DOC_DATE, BATCH_NO, DOFF_BATCH_NO, SALES_ORDER_NO, "
-    "LOOM_NO, DOFF_LENGTH"
+    "MANDT, DOCID, DOCID_DTL, DYESET_CD, ARTICLE, LOTNO, BEAM_NO, LEGACY_NO, OPERATOR, "
+    "USERIN, USERUP, PALLATE_NO, BATCHER_NO, FINISH_LENGTH, PROCESS_TYPE, MACHINE_WORKCEN, "
+    "OPERATION, FINISH_TYPE, REMARKS, DATEIN, TIMEIN, START_DATE, START_TIME, DATEUP, "
+    "STOP_DATE, STOP_TIME, TIMEUP, TIMEMINUTES, DOC_DATE, BATCH_NO, DOFF_BATCH_NO, "
+    "DOFF_DOCID, DOFF_DOCID_DTL, SALES_ORDER_NO, LOOM_NO, DOFF_LENGTH"
 )
-_FIN_PLACEHOLDERS = ", ".join(["?"] * 32)
+_FIN_PLACEHOLDERS = ", ".join(["?"] * 36)
 
 _FIN_REQUIRED_INPUT = ("operator", "palate", "batcher", "finishLength", "workcen", "processType")
 
@@ -232,6 +234,21 @@ def _fin_next_docid(cur):
         f"SELECT IFNULL(MAX(TO_BIGINT(DOCID)), 0) + 1 FROM {FIN_TABLE} "
         f"WHERE MANDT = ? AND DOCID <> '' AND DOCID NOT LIKE '%[^0-9]%'",
         [FIN_MANDT],
+    )
+    return int(cur.fetchone()[0])
+
+
+def _fin_next_docid_dtl(cur, docid):
+    """Next DOCID_DTL line sequence for a given DOCID, zero-padded to 10.
+
+    Each DOCID groups one or more detail lines (0000000001, 0000000002, …). For a
+    freshly generated DOCID this is 0000000001.
+    """
+    cur.execute(
+        f"SELECT IFNULL(MAX(TO_INT(DOCID_DTL)), 0) + 1 FROM {FIN_TABLE} "
+        f"WHERE MANDT = ? AND DOCID = ? AND DOCID_DTL <> '' "
+        f"AND DOCID_DTL NOT LIKE '%[^0-9]%'",
+        [FIN_MANDT, docid],
     )
     return int(cur.fetchone()[0])
 
@@ -264,14 +281,17 @@ def _fin_insert(conn, scan, inp, started, stopped):
 
     cur = conn.cursor()
     docid = str(_fin_next_docid(cur)).zfill(10)
+    docid_dtl = str(_fin_next_docid_dtl(cur, docid)).zfill(10)
 
     params = [
         FIN_MANDT,                       # MANDT
         docid,                           # DOCID
+        docid_dtl,                       # DOCID_DTL (line seq for this DOCID)
         scan.get("DYESET", ""),          # DYESET_CD
         scan.get("ARTICLE", ""),         # ARTICLE
         scan.get("LOT_NO", ""),          # LOTNO
-        scan.get("BEAM_NO", ""),         # LEGACY_NO
+        scan.get("BEAM_NO", ""),         # BEAM_NO      <- query BEAM_NO
+        scan.get("LEGACY_NO", ""),       # LEGACY_NO    <- query LEGACY_NO
         operator,                        # OPERATOR
         operator,                        # USERIN
         operator,                        # USERUP
@@ -295,6 +315,8 @@ def _fin_insert(conn, scan, inp, started, stopped):
         doc_date,                        # DOC_DATE
         scan.get("BATCH_NO", ""),        # BATCH_NO
         scan.get("DD_BATCH_NO", ""),     # DOFF_BATCH_NO  <- ZWV_DOF_DD2.BATCH_NO
+        scan.get("DOFF_DOCID", ""),      # DOFF_DOCID     <- ZWV_DOF_DD2.DOCID
+        scan.get("DOFF_DOCID_DTL", ""),  # DOFF_DOCID_DTL <- ZWV_DOF_DD2.DOCID_DTL
         scan.get("SALES_ORDER_NO", ""),  # SALES_ORDER_NO
         scan.get("LOOM_NO", ""),         # LOOM_NO
         _dec(scan.get("DOFF_LENGTH")),   # DOFF_LENGTH

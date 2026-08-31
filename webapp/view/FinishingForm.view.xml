@@ -41,7 +41,7 @@
 			</Bar>
 		</customHeader>
 
-		<!-- Machine start/stop + times + Save/Clear action toolbar on top -->
+		<!-- Action toolbar: only the buttons, so Save/Clear never overflow -->
 		<subHeader>
 			<OverflowToolbar design="Solid" class="finActionBar">
 				<Button
@@ -60,20 +60,7 @@
 					press=".onStop"/>
 
 				<core:Icon src="sap-icon://busy" size="1.25rem" visible="{form>/running}" class="finRunning"/>
-
-				<ToolbarSeparator/>
-				<Label text="{i18n>tbStarted}"/>
-				<Text text="{= ${form>/startedText} || '—' }"/>
-				<Label text="{i18n>tbStopped}"/>
-				<Text text="{= ${form>/stoppedText} || '—' }"/>
-				<Label text="{i18n>tbElapsed}"/>
-				<ObjectStatus
-					text="{form>/elapsedText}"
-					state="{= ${form>/running} ? 'Information' : (${form>/stopped} ? 'Success' : 'None') }"/>
-				<Label text="{i18n>tbMinutes}"/>
-				<ObjectStatus
-					text="{= ${form>/totalMinutesText} || '0' }"
-					state="{= ${form>/stopped} ? 'Success' : 'None' }"/>
+				<Text text="{i18n>msgRunning}" visible="{form>/running}"/>
 
 				<ToolbarSpacer/>
 				<Button
@@ -92,6 +79,25 @@
 		</subHeader>
 
 		<content>
+
+			<!-- Machine times on their own line (never crowd the buttons) -->
+			<Toolbar class="finTimesBar">
+				<Label text="{i18n>tbStarted}" design="Bold"/>
+				<Text text="{= ${form>/startedText} || '—' }"/>
+				<ToolbarSeparator/>
+				<Label text="{i18n>tbStopped}" design="Bold"/>
+				<Text text="{= ${form>/stoppedText} || '—' }"/>
+				<ToolbarSeparator/>
+				<Label text="{i18n>tbElapsed}" design="Bold"/>
+				<ObjectStatus
+					text="{form>/elapsedText}"
+					state="{= ${form>/running} ? 'Information' : (${form>/stopped} ? 'Success' : 'None') }"/>
+				<ToolbarSeparator/>
+				<Label text="{i18n>tbMinutes}" design="Bold"/>
+				<ObjectStatus
+					text="{= ${form>/totalMinutesText} || '0' }"
+					state="{= ${form>/stopped} ? 'Success' : 'None' }"/>
+			</Toolbar>
 			<!-- Batch details (left) and Finishing entry (right), side by side -->
 			<HBox wrap="Wrap" alignItems="Stretch" class="sapUiSmallMargin">
 

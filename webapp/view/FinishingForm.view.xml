@@ -20,7 +20,7 @@
 						id="inpScan"
 						value="{form>/scanText}"
 						placeholder="{i18n>phScan}"
-						enabled="{= !${form>/running} &amp;&amp; !${form>/stopped} }"
+						enabled="{= !${form>/running} &amp;&amp; !${form>/stopped} &amp;&amp; ${form>/sapOnline} }"
 						submit=".onScan"
 						width="22rem"/>
 					<Button
@@ -28,14 +28,14 @@
 						text="{i18n>btnScanQr}"
 						icon="sap-icon://bar-code"
 						tooltip="{i18n>btnScanQr}"
-						enabled="{= !${form>/running} &amp;&amp; !${form>/stopped} }"
+						enabled="{= !${form>/running} &amp;&amp; !${form>/stopped} &amp;&amp; ${form>/sapOnline} }"
 						press=".onScanQr"/>
 					<Button
 						id="btnLoad"
 						text="{i18n>btnLoad}"
 						type="Emphasized"
 						icon="sap-icon://search"
-						enabled="{= !${form>/running} &amp;&amp; !${form>/stopped} }"
+						enabled="{= !${form>/running} &amp;&amp; !${form>/stopped} &amp;&amp; ${form>/sapOnline} }"
 						press=".onScan"/>
 				</contentMiddle>
 			</Bar>
@@ -68,7 +68,7 @@
 					text="{i18n>btnSave}"
 					type="Emphasized"
 					icon="sap-icon://save"
-					enabled="{form>/stopped}"
+					enabled="{= ${form>/stopped} &amp;&amp; ${form>/sapOnline} }"
 					press=".onSave"/>
 				<Button
 					id="btnClear"
@@ -79,6 +79,19 @@
 		</subHeader>
 
 		<content>
+
+			<!-- SAP/HANA availability banner (shown only when the server is down) -->
+			<MessageStrip
+				id="sapStatusStrip"
+				visible="{= !${form>/sapOnline} }"
+				text="{i18n>sapOffline}"
+				type="Error"
+				showIcon="true"
+				class="sapUiSmallMarginBegin sapUiSmallMarginEnd sapUiSmallMarginTop">
+				<link>
+					<Link text="{i18n>sapRetry}" press=".onRetryHealth"/>
+				</link>
+			</MessageStrip>
 
 			<!-- Machine times on their own line (never crowd the buttons) -->
 			<Toolbar class="finTimesBar">

@@ -51,6 +51,8 @@ HANA = {
     "encrypt": os.environ.get("HANA_ENCRYPT", "true").lower() == "true",
 }
 PORT = int(os.environ.get("PORT", "8000"))
+# HANA connect/communication timeout in ms (fail fast when SAP is down).
+CONNECT_TIMEOUT_MS = int(os.environ.get("HANA_TIMEOUT_MS", "5000"))
 
 WEBAPP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webapp"))
 
@@ -62,6 +64,8 @@ def get_conn():
             "HANA connection is not configured. Copy server/.env.example to "
             "server/.env and fill in HANA_HOST / HANA_PORT / HANA_USER / HANA_PASSWORD."
         )
+    # Short timeouts so requests fail fast (with a clear message) when SAP/HANA
+    # is down, instead of the browser hanging.
     return dbapi.connect(
         address=HANA["address"],
         port=HANA["port"],
@@ -69,6 +73,8 @@ def get_conn():
         password=HANA["password"],
         encrypt=HANA["encrypt"],
         sslValidateCertificate=False,
+        connectTimeout=CONNECT_TIMEOUT_MS,
+        communicationTimeout=CONNECT_TIMEOUT_MS,
     )
 
 
@@ -87,6 +93,27 @@ def index():
 @app.route("/<path:path>")
 def static_files(path):
     return send_from_directory(WEBAPP_DIR, path)
+
+
+@app.get("/api/health")
+def api_health():
+    """Report whether the SAP HANA server is reachable (SELECT 1 FROM DUMMY)."""
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM DUMMY")
+        cur.fetchone()
+        cur.close()
+        return jsonify({"ok": True})
+    except Exception as exc:                     # RuntimeError, dbapi.Error, timeouts…
+        return jsonify({"ok": False, "error": str(exc)})
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

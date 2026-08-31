@@ -26,6 +26,15 @@ sap.ui.define([
 		onInit: function () {
 			this.getView().setModel(this._newModel(), "form");
 			this._tickHandle = null;
+			// Check SAP/HANA availability now and poll periodically.
+			this._checkHealth();
+			this._healthTimer = setInterval(this._checkHealth.bind(this), 20000);
+		},
+
+		onExit: function () {
+			this._stopCamera();
+			if (this._tickHandle) { clearInterval(this._tickHandle); }
+			if (this._healthTimer) { clearInterval(this._healthTimer); }
 		},
 
 		/** Fresh empty form/runtime state. */
@@ -36,6 +45,7 @@ sap.ui.define([
 				scanned: false,
 				running: false,
 				stopped: false,
+				sapOnline: true,               // SAP/HANA reachable (updated by _checkHealth)
 				inputsEnabled: false,          // scanned && !running && !stopped
 				input: {
 					operator: "",
@@ -58,6 +68,30 @@ sap.ui.define([
 			var m = this.getView().getModel("form");
 			var d = m.getData();
 			m.setProperty("/inputsEnabled", d.scanned && !d.running && !d.stopped);
+		},
+
+		// ----- SAP availability ---------------------------------------------
+
+		/** Ping the backend health endpoint and flip the SAP-online banner. */
+		_checkHealth: function () {
+			var oModel = this.getView().getModel("form");
+			fetch("api/health")
+				.then(function (res) { return res.json(); })
+				.then(function (body) {
+					var bOnline = !!(body && body.ok);
+					var bWas = oModel.getProperty("/sapOnline");
+					oModel.setProperty("/sapOnline", bOnline);
+					if (bOnline && bWas === false) {
+						MessageToast.show(this._t("sapBackOnline"));
+					}
+				}.bind(this))
+				.catch(function () {
+					oModel.setProperty("/sapOnline", false);
+				});
+		},
+
+		onRetryHealth: function () {
+			this._checkHealth();
 		},
 
 		// ----- Scan ----------------------------------------------------------

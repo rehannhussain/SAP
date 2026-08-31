@@ -53,6 +53,7 @@ sap.ui.define([
 					batcher: "",
 					finishLength: "",
 					workcen: "",
+					finishType: "FINISH",
 					chksel: false
 				},
 				startedAt: null,               // ISO string
@@ -320,6 +321,7 @@ sap.ui.define([
 					finishLength: String(d.input.finishLength).trim(),
 					workcen: d.input.workcen,
 					processType: PROCESS_BY_WORKCEN[d.input.workcen] || "",
+					finishType: d.input.finishType || "FINISH",
 					chksel: !!d.input.chksel
 				},
 				startedAt: d.startedAt,

@@ -208,6 +208,17 @@
 								<core:Item key="ZRFS_01" text="CIBITEX SANFOR"/>
 							</ComboBox>
 
+							<Label text="{i18n>lblFinishType}" required="true"/>
+							<ComboBox
+								id="cbFinishType"
+								selectedKey="{form>/input/finishType}"
+								placeholder="{i18n>phFinishType}"
+								enabled="{form>/inputsEnabled}">
+								<core:Item key="FINISH" text="FINISH"/>
+								<core:Item key="REFINISH" text="REFINISH"/>
+								<core:Item key="LEADLINE" text="LEADLINE"/>
+							</ComboBox>
+
 							<Label text="{i18n>lblChksel}"/>
 							<CheckBox
 								id="cbChksel"

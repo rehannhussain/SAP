@@ -120,7 +120,8 @@ def api_health():
 # Finishing (Sanfor) API
 # ---------------------------------------------------------------------------
 
-FIN_TABLE = "SAPHANADB.ZFN_FAB_PRD_D"
+FIN_TABLE = "SAPHANADB.ZFN_FAB_PRD_D"      # detail
+FIN_TABLE_M = "SAPHANADB.ZFN_FAB_PRD_M"    # header
 FIN_MANDT = "900"
 
 # Scanned context echoed from /scan back into /records (all strings from HANA).
@@ -245,15 +246,70 @@ def _strip_article(article):
     """Drop the first three characters (the 'FF ' prefix), e.g. 'FF HFZ-6514' -> 'HFZ-6514'."""
     return article[3:] if len(article) > 3 else article
 
-_FIN_REQUIRED_INPUT = ("operator", "palate", "batcher", "finishLength", "workcen", "processType")
+
+# Header (ZFN_FAB_PRD_M) insert columns. Every other column is NOT NULL with a
+# DB default, so listing only these is safe.
+_FIN_M_COLUMNS = (
+    "MANDT, DOCID, DYESET, ARTICLE, LOTNO_SNR, BEAM_NO_SRN, LEGACY_NO_SNR, DOC_DATE, "
+    "PROCESS_TYPE, MACHINE_WORKCEN, OPERATION, FINISH_TYPE, AUFNR, OUT_MATNR, OUT_UOM, "
+    "DATEIN, TIMEIN, USERIN, DATEUP, TIMEUP, USERUP, TCODE"
+)
+_FIN_M_PLACEHOLDERS = ", ".join(["?"] * 22)
+
+
+def _fin_order_lookup(cur, lotno):
+    """
+    Resolve (AUFNR, OUT_MATNR, OUT_UOM) for a lot, mirroring the ABAP SELECT SINGLE.
+
+    NOTE: on this S/4HANA system MSEG is empty (data moved to MATDOC), so the
+    material-document filter reads MATDOC. Returns ('', '', '') when nothing matches.
+    """
+    lotno = (lotno or "").strip()
+    if not lotno:
+        return "", "", ""
+    cur.execute(
+        "SELECT spo.FINISHING_PROD_NO, af.PLNBEZ "
+        "FROM SAPHANADB.ZSIZ_PLN_M spm "
+        "INNER JOIN SAPHANADB.ZSIZ_PLN_D spd ON spm.DOCID = spd.DOCID "
+        "INNER JOIN SAPHANADB.ZSIZPLN_WF_ORD_D spo ON spm.DOCID = spo.DOCID "
+        "INNER JOIN SAPHANADB.AFKO af ON spo.WEAVING_PROD_NO = af.AUFNR "
+        "WHERE spm.MANDT = ? AND spm.LOT_NO = ? "
+        "AND spm.LOT_NO IN (SELECT ABLAD FROM SAPHANADB.MATDOC "
+        "WHERE MANDT = ? AND MATNR LIKE '0000000036%' AND BWART = '101' AND AUFNR LIKE '0060%') "
+        "LIMIT 1",
+        [FIN_MANDT, lotno, FIN_MANDT],
+    )
+    row = cur.fetchone()
+    if not row:
+        return "", "", ""
+    aufnr = "" if row[0] is None else str(row[0])
+    out_matnr = "" if row[1] is None else str(row[1])
+    out_uom = ""
+    if out_matnr:
+        cur.execute(
+            "SELECT MEINS FROM SAPHANADB.MARA WHERE MANDT = ? AND MATNR = ?",
+            [FIN_MANDT, out_matnr],
+        )
+        m = cur.fetchone()
+        if m and m[0] is not None:
+            out_uom = str(m[0])
+    return aufnr, out_matnr, out_uom
+
+
+_FIN_REQUIRED_INPUT = ("operator", "palate", "batcher", "finishLength", "workcen",
+                       "processType", "finishType")
 
 
 def _fin_next_docid(cur):
-    """Next numeric DOCID for MANDT 900, zero-padded to 10 (guards non-numeric ids)."""
+    """Next DOCID shared by the M header and D detail = MAX over both tables + 1."""
     cur.execute(
-        f"SELECT IFNULL(MAX(TO_BIGINT(DOCID)), 0) + 1 FROM {FIN_TABLE} "
-        f"WHERE MANDT = ? AND DOCID <> '' AND DOCID NOT LIKE '%[^0-9]%'",
-        [FIN_MANDT],
+        "SELECT GREATEST("
+        f"(SELECT IFNULL(MAX(TO_BIGINT(DOCID)),0) FROM {FIN_TABLE_M} "
+        "WHERE MANDT=? AND DOCID<>'' AND DOCID NOT LIKE '%[^0-9]%'),"
+        f"(SELECT IFNULL(MAX(TO_BIGINT(DOCID)),0) FROM {FIN_TABLE} "
+        "WHERE MANDT=? AND DOCID<>'' AND DOCID NOT LIKE '%[^0-9]%')"
+        ") + 1 FROM DUMMY",
+        [FIN_MANDT, FIN_MANDT],
     )
     return int(cur.fetchone()[0])
 
@@ -288,9 +344,11 @@ def _dec(value):
 
 
 def _fin_insert(conn, scan, inp, started, stopped):
-    """Insert one finished Sanfor run. Returns the generated DOCID string."""
+    """Insert one finished Sanfor run: header (M) + detail (D) under one shared
+    DOCID, in a single transaction. Returns the generated DOCID string."""
     seconds = max(0, round((stopped - started).total_seconds()))
     minutes = round(seconds / 60)
+    elapsed = _hhmmss(seconds)
 
     start_date = started.strftime("%Y%m%d")
     start_time = started.strftime("%H%M%S")
@@ -298,17 +356,48 @@ def _fin_insert(conn, scan, inp, started, stopped):
     stop_time = stopped.strftime("%H%M%S")
     doc_date = datetime.now().strftime("%Y%m%d")
     operator = inp["operator"]
+    article = _strip_article(scan.get("ARTICLE", ""))   # 'FF ' prefix dropped, M and D
 
+    conn.setautocommit(False)                            # header + detail commit together
     cur = conn.cursor()
     docid = str(_fin_next_docid(cur)).zfill(10)
     docid_dtl = str(_fin_next_docid_dtl(cur, docid)).zfill(10)
+    aufnr, out_matnr, out_uom = _fin_order_lookup(cur, scan.get("LOT_NO", ""))
 
-    params = [
+    # --- header: ZFN_FAB_PRD_M -------------------------------------------
+    m_params = [
         FIN_MANDT,                       # MANDT
         docid,                           # DOCID
+        scan.get("DYESET", ""),          # DYESET
+        article,                         # ARTICLE (stripped)
+        scan.get("LOT_NO", ""),          # LOTNO_SNR
+        scan.get("BEAM_NO", ""),         # BEAM_NO_SRN
+        scan.get("LEGACY_NO", ""),       # LEGACY_NO_SNR
+        doc_date,                        # DOC_DATE
+        "FINISH",                        # PROCESS_TYPE (fixed for the header)
+        inp["workcen"],                  # MACHINE_WORKCEN
+        "SNFR",                          # OPERATION
+        inp["finishType"],               # FINISH_TYPE (dropdown)
+        aufnr,                           # AUFNR   (order lookup)
+        out_matnr,                       # OUT_MATNR
+        out_uom,                         # OUT_UOM
+        start_date,                      # DATEIN
+        start_time,                      # TIMEIN
+        operator,                        # USERIN
+        stop_date,                       # DATEUP
+        elapsed,                         # TIMEUP (elapsed HHMMSS)
+        operator,                        # USERUP
+        "ZWFN",                          # TCODE
+    ]
+    cur.execute(f"INSERT INTO {FIN_TABLE_M} ({_FIN_M_COLUMNS}) VALUES ({_FIN_M_PLACEHOLDERS})", m_params)
+
+    # --- detail: ZFN_FAB_PRD_D -------------------------------------------
+    d_params = [
+        FIN_MANDT,                       # MANDT
+        docid,                           # DOCID (shared with the header)
         docid_dtl,                       # DOCID_DTL (line seq for this DOCID)
         scan.get("DYESET", ""),          # DYESET_CD
-        _strip_article(scan.get("ARTICLE", "")),  # ARTICLE (first 3 chars dropped)
+        article,                         # ARTICLE (first 3 chars dropped)
         scan.get("LOT_NO", ""),          # LOTNO
         scan.get("BEAM_NO", ""),         # BEAM_NO      <- query BEAM_NO
         scan.get("LEGACY_NO", ""),       # LEGACY_NO    <- query LEGACY_NO
@@ -321,7 +410,7 @@ def _fin_insert(conn, scan, inp, started, stopped):
         inp["processType"],              # PROCESS_TYPE (dropdown text)
         inp["workcen"],                  # MACHINE_WORKCEN (dropdown value)
         "SNFR",                          # OPERATION
-        "FINISH",                        # FINISH_TYPE
+        "FINISH",                        # FINISH_TYPE (fixed for the detail)
         "ZWFN",                          # REMARKS (the TCODE)
         start_date,                      # DATEIN
         start_time,                      # TIMEIN
@@ -330,7 +419,7 @@ def _fin_insert(conn, scan, inp, started, stopped):
         stop_date,                       # DATEUP
         stop_date,                       # STOP_DATE
         stop_time,                       # STOP_TIME
-        _hhmmss(seconds),                # TIMEUP (elapsed HHMMSS)
+        elapsed,                         # TIMEUP (elapsed HHMMSS)
         minutes,                         # TIMEMINUTES (total running minutes)
         doc_date,                        # DOC_DATE
         scan.get("BATCH_NO", ""),        # BATCH_NO
@@ -343,7 +432,8 @@ def _fin_insert(conn, scan, inp, started, stopped):
         "X" if inp.get("chksel") else "",  # CHKSEL (checkbox)
         _shift_for(start_time),          # SHIFT (from machine start time)
     ]
-    cur.execute(f"INSERT INTO {FIN_TABLE} ({_FIN_COLUMNS}) VALUES ({_FIN_PLACEHOLDERS})", params)
+    cur.execute(f"INSERT INTO {FIN_TABLE} ({_FIN_COLUMNS}) VALUES ({_FIN_PLACEHOLDERS})", d_params)
+
     conn.commit()
     cur.close()
     return docid
@@ -388,6 +478,10 @@ def api_finishing_create():
                 docid = _fin_insert(conn, scan, clean, started, stopped)
                 return jsonify({"docid": docid}), 201
             except dbapi.Error as exc:
+                try:
+                    conn.rollback()          # discard the partial header+detail
+                except Exception:
+                    pass
                 if attempt == 0 and getattr(exc, "errorcode", None) == 301:
                     continue
                 return jsonify({"error": str(exc)}), 500

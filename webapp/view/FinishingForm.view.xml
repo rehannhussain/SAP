@@ -143,6 +143,8 @@
 							<Label text="{i18n>lblLegacyNo}"/>
 							<Text text="{form>/scan/LEGACY_NO}"/>
 							<Label text="{i18n>lblDoffBatchNo}"/>
+							<Text text="{form>/scan/DD_BATCH_NO}"/>
+							<Label text="{i18n>lblDoffBatchCode}"/>
 							<Text text="{form>/scan/DOFF_BATCHNO}"/>
 							<Label text="{i18n>lblDoffLength}"/>
 							<Text text="{form>/scan/DOFF_LENGTH}"/>

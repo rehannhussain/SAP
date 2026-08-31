@@ -122,7 +122,7 @@ sap.ui.define([
 					oModel.setProperty("/scan", r.body);
 					oModel.setProperty("/scanned", true);
 					this._syncEnabled();
-					MessageToast.show(this._t("lblDoffBatchNo") + ": " + (r.body.DOFF_BATCHNO || sDoff));
+					MessageToast.show(this._t("lblDoffBatchCode") + ": " + (r.body.DOFF_BATCHNO || sDoff));
 				}.bind(this))
 				.catch(function () {
 					oBtn.setBusy(false);

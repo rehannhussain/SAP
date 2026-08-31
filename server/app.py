@@ -124,15 +124,17 @@ FIN_TABLE = "SAPHANADB.ZFN_FAB_PRD_D"
 FIN_MANDT = "900"
 
 # Scanned context echoed from /scan back into /records (all strings from HANA).
+# DD_BATCH_NO is ZWV_DOF_DD2.BATCH_NO (distinct from A.BATCH_NO); it is written to
+# ZFN_FAB_PRD_D.DOFF_BATCH_NO on insert.
 _FIN_SCAN_FIELDS = (
     "BATCH_NO", "ARTICLE", "DYESET", "SALES_ORDER_NO", "LOT_NO",
-    "BEAM_NO", "LOOM_NO", "LEGACY_NO", "DOFF_BATCHNO", "DOFF_LENGTH",
+    "BEAM_NO", "LOOM_NO", "LEGACY_NO", "DOFF_BATCHNO", "DOFF_LENGTH", "DD_BATCH_NO",
 )
 
 
 _FIN_SCAN_SELECT = (
     "SELECT A.BATCH_NO, A.ARTICLE, A.DYESET, A.SALES_ORDER_NO, A.LOT_NO, "
-    "A.BEAM_NO, A.LOOM_NO, A.LEGACY_NO, B.DOFF_BATCHNO, B.DOFF_LENGTH "
+    "A.BEAM_NO, A.LOOM_NO, A.LEGACY_NO, B.DOFF_BATCHNO, B.DOFF_LENGTH, B.BATCH_NO "
     "FROM SAPHANADB.ZWV_DOF_D A "
     "INNER JOIN SAPHANADB.ZWV_DOF_DD2 B ON A.DOCID = B.DOCID "
     "WHERE A.MANDT = ? AND "
@@ -292,7 +294,7 @@ def _fin_insert(conn, scan, inp, started, stopped):
         minutes,                         # TIMEMINUTES (total running minutes)
         doc_date,                        # DOC_DATE
         scan.get("BATCH_NO", ""),        # BATCH_NO
-        scan.get("DOFF_BATCHNO", ""),    # DOFF_BATCH_NO
+        scan.get("DD_BATCH_NO", ""),     # DOFF_BATCH_NO  <- ZWV_DOF_DD2.BATCH_NO
         scan.get("SALES_ORDER_NO", ""),  # SALES_ORDER_NO
         scan.get("LOOM_NO", ""),         # LOOM_NO
         _dec(scan.get("DOFF_LENGTH")),   # DOFF_LENGTH

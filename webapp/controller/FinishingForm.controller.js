@@ -52,7 +52,8 @@ sap.ui.define([
 					palate: "",
 					batcher: "",
 					finishLength: "",
-					workcen: ""
+					workcen: "",
+					chksel: false
 				},
 				startedAt: null,               // ISO string
 				stoppedAt: null,               // ISO string
@@ -318,7 +319,8 @@ sap.ui.define([
 					batcher: d.input.batcher.trim(),
 					finishLength: String(d.input.finishLength).trim(),
 					workcen: d.input.workcen,
-					processType: PROCESS_BY_WORKCEN[d.input.workcen] || ""
+					processType: PROCESS_BY_WORKCEN[d.input.workcen] || "",
+					chksel: !!d.input.chksel
 				},
 				startedAt: d.startedAt,
 				stoppedAt: d.stoppedAt

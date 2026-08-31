@@ -207,6 +207,13 @@
 								<core:Item key="ZCIS_01" text="MONFORT SANFOR"/>
 								<core:Item key="ZRFS_01" text="CIBITEX SANFOR"/>
 							</ComboBox>
+
+							<Label text="{i18n>lblChksel}"/>
+							<CheckBox
+								id="cbChksel"
+								selected="{form>/input/chksel}"
+								text="{i18n>chkselText}"
+								enabled="{form>/inputsEnabled}"/>
 						</f:content>
 					</f:SimpleForm>
 				</Panel>

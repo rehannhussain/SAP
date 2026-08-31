@@ -221,9 +221,29 @@ _FIN_COLUMNS = (
     "USERIN, USERUP, PALLATE_NO, BATCHER_NO, FINISH_LENGTH, PROCESS_TYPE, MACHINE_WORKCEN, "
     "OPERATION, FINISH_TYPE, REMARKS, DATEIN, TIMEIN, START_DATE, START_TIME, DATEUP, "
     "STOP_DATE, STOP_TIME, TIMEUP, TIMEMINUTES, DOC_DATE, BATCH_NO, DOFF_BATCH_NO, "
-    "DOFF_DOCID, DOFF_DOCID_DTL, SALES_ORDER_NO, LOOM_NO, DOFF_LENGTH"
+    "DOFF_DOCID, DOFF_DOCID_DTL, SALES_ORDER_NO, LOOM_NO, DOFF_LENGTH, CHKSEL, SHIFT"
 )
-_FIN_PLACEHOLDERS = ", ".join(["?"] * 36)
+_FIN_PLACEHOLDERS = ", ".join(["?"] * 38)
+
+
+def _hhmmss(seconds):
+    """Format an elapsed duration (seconds) as HHMMSS, e.g. 60295 -> '164455'."""
+    seconds = max(0, int(seconds))
+    return "%02d%02d%02d" % (seconds // 3600, (seconds % 3600) // 60, seconds % 60)
+
+
+def _shift_for(hhmmss):
+    """Shift from a HHMMSS time: A 07:00–15:00, B 15:00–23:00, else C."""
+    if "070000" <= hhmmss < "150000":
+        return "A"
+    if "150000" <= hhmmss < "230000":
+        return "B"
+    return "C"
+
+
+def _strip_article(article):
+    """Drop the first three characters (the 'FF ' prefix), e.g. 'FF HFZ-6514' -> 'HFZ-6514'."""
+    return article[3:] if len(article) > 3 else article
 
 _FIN_REQUIRED_INPUT = ("operator", "palate", "batcher", "finishLength", "workcen", "processType")
 
@@ -288,7 +308,7 @@ def _fin_insert(conn, scan, inp, started, stopped):
         docid,                           # DOCID
         docid_dtl,                       # DOCID_DTL (line seq for this DOCID)
         scan.get("DYESET", ""),          # DYESET_CD
-        scan.get("ARTICLE", ""),         # ARTICLE
+        _strip_article(scan.get("ARTICLE", "")),  # ARTICLE (first 3 chars dropped)
         scan.get("LOT_NO", ""),          # LOTNO
         scan.get("BEAM_NO", ""),         # BEAM_NO      <- query BEAM_NO
         scan.get("LEGACY_NO", ""),       # LEGACY_NO    <- query LEGACY_NO
@@ -310,7 +330,7 @@ def _fin_insert(conn, scan, inp, started, stopped):
         stop_date,                       # DATEUP
         stop_date,                       # STOP_DATE
         stop_time,                       # STOP_TIME
-        str(seconds),                    # TIMEUP (total running seconds)
+        _hhmmss(seconds),                # TIMEUP (elapsed HHMMSS)
         minutes,                         # TIMEMINUTES (total running minutes)
         doc_date,                        # DOC_DATE
         scan.get("BATCH_NO", ""),        # BATCH_NO
@@ -320,6 +340,8 @@ def _fin_insert(conn, scan, inp, started, stopped):
         scan.get("SALES_ORDER_NO", ""),  # SALES_ORDER_NO
         scan.get("LOOM_NO", ""),         # LOOM_NO
         _dec(scan.get("DOFF_LENGTH")),   # DOFF_LENGTH
+        "X" if inp.get("chksel") else "",  # CHKSEL (checkbox)
+        _shift_for(start_time),          # SHIFT (from machine start time)
     ]
     cur.execute(f"INSERT INTO {FIN_TABLE} ({_FIN_COLUMNS}) VALUES ({_FIN_PLACEHOLDERS})", params)
     conn.commit()
@@ -352,6 +374,7 @@ def api_finishing_create():
         return jsonify({"error": "Machine stop time is before start time."}), 400
 
     clean = {f: str(inp[f]).strip() for f in _FIN_REQUIRED_INPUT}
+    clean["chksel"] = bool(inp.get("chksel"))
 
     # --- insert (retry once on a concurrent key clash) --------------------
     try:

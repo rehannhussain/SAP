@@ -17,6 +17,7 @@ Run:  python server/app.py   ->   http://localhost:8000
 
 import os
 import re
+from decimal import Decimal
 from datetime import datetime, date
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -389,7 +390,7 @@ def _post_311(plant, from_sloc, to_sloc, material, batch, qty, uom, operator):
             "STGE_LOC": from_sloc,          # issuing (from)
             "MOVE_TYPE": MOVE_TYPE,         # 311
             "MOVE_STLOC": to_sloc,          # receiving (to)
-            "ENTRY_QNT": qty,
+            "ENTRY_QNT": Decimal(str(qty)),  # QUAN field -> pyrfc requires Decimal
             "ENTRY_UOM": uom,
         }
         if batch:

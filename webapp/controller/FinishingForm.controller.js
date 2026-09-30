@@ -347,6 +347,9 @@ sap.ui.define([
 						return;
 					}
 					var sMsg = this._t("msgSaved", [r.body && r.body.docid]);
+					if (r.body && r.body.matdoc) {
+						sMsg += "\n" + this._t("msgMoved", [r.body.matdoc]);
+					}
 					var oOpts = { title: this._t("msgSavedTitle"), onClose: this.onReset.bind(this) };
 					if (r.body && r.body.warning) {
 						MessageBox.warning(sMsg + "\n\n" + r.body.warning, oOpts);

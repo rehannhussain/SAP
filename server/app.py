@@ -17,7 +17,7 @@ Run:  python server/app.py   ->   http://localhost:8000
 
 import os
 import re
-from datetime import datetime
+from datetime import datetime, date
 
 from flask import Flask, request, jsonify, send_from_directory
 from hdbcli import dbapi
@@ -26,6 +26,25 @@ try:
     import pyodbc                       # optional: KT SQL Server mirror
 except ImportError:
     pyodbc = None
+
+
+def _register_nwrfc_sdk():
+    """Make the SAP NW RFC SDK DLLs loadable on Windows without editing PATH, so
+    `import pyrfc` works. No-op off Windows or when the SDK isn't found."""
+    if os.name != "nt":
+        return
+    home = os.environ.get("SAPNWRFC_HOME", r"C:\SAP\nwrfcsdk")
+    libdir = os.path.join(home, "lib")
+    if not os.path.isdir(libdir):
+        return
+    add = getattr(os, "add_dll_directory", None)
+    if add:
+        try:
+            add(libdir)
+        except OSError:
+            pass
+    if libdir.lower() not in os.environ.get("PATH", "").lower():
+        os.environ["PATH"] = libdir + os.pathsep + os.environ.get("PATH", "")
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -47,6 +66,7 @@ def _load_dotenv():
 
 
 _load_dotenv()
+_register_nwrfc_sdk()
 
 HANA = {
     "address": os.environ.get("HANA_HOST", ""),
@@ -74,6 +94,31 @@ KT_ENABLED = (
     and pyodbc is not None
     and bool(KT["server"])
 )
+
+# --- SAP RFC (311 transfer posting via BAPI_GOODSMVT_CREATE) ---------------
+# On Save the finished quantity is transferred 3019 -> 3055 (move type 311)
+# before the HANA/SQL save. Set SAP_RFC_MOCK=true to fake the material doc for
+# UI testing (no real posting). Reuses the same SAP connection as ZSTM.
+def _envbool(name, default=False):
+    return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+
+SAP_RFC_MOCK = _envbool("SAP_RFC_MOCK", False)
+_rfc = {
+    "user": os.environ.get("SAP_USER", ""),
+    "passwd": os.environ.get("SAP_PASSWD", ""),
+    "ashost": os.environ.get("SAP_ASHOST", ""),
+    "sysnr": os.environ.get("SAP_SYSNR", ""),
+    "client": os.environ.get("SAP_CLIENT", "900"),
+    "lang": os.environ.get("SAP_LANG", "EN"),
+    "dest": os.environ.get("SAP_DEST", ""),
+}
+RFC_PARAMS = {k: v for k, v in _rfc.items() if v}
+GM_CODE = os.environ.get("SAP_GM_CODE", "04")        # MB1B transfer posting
+MOVE_TYPE = os.environ.get("SAP_MOVE_TYPE", "311")   # stock-to-stock, sloc->sloc
+USE_MATERIAL_LONG = _envbool("SAP_USE_MATERIAL_LONG", True)
+HEADER_TXT = os.environ.get("SAP_HEADER_TXT", "ZWFN")[:25]
+MOVE_311_ENABLED = _envbool("MOVE_311_ENABLED", True)
 
 WEBAPP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "webapp"))
 
@@ -143,6 +188,7 @@ def api_health():
 
 FIN_TABLE = "SAPHANADB.ZFN_FAB_PRD_D"      # detail
 FIN_TABLE_M = "SAPHANADB.ZFN_FAB_PRD_M"    # header
+FIN_TRANSIT_TABLE = "SAPHANADB.ZSTM_TRANSIT_D"   # doff-in-transit (3019 -> 3055)
 FIN_MANDT = "900"
 
 # Scanned context echoed from /scan back into /records (all strings from HANA).
@@ -152,15 +198,26 @@ _FIN_SCAN_FIELDS = (
     "BATCH_NO", "ARTICLE", "DYESET", "SALES_ORDER_NO", "LOT_NO",
     "BEAM_NO", "LOOM_NO", "LEGACY_NO", "DOFF_BATCHNO", "DOFF_LENGTH", "DD_BATCH_NO",
     "DOFF_DOCID", "DOFF_DOCID_DTL",
+    # transit context (ZSTM_TRANSIT_D) — drives the 311 move 3019 -> 3055
+    "TR_DOCID", "TR_WERKS", "TR_LGORT", "TR_UMLGO", "TR_MATNR", "TR_CHARG",
+    "TR_MENGE", "TR_MEINS",
 )
 
 
+# The doff must currently be "in transit" (one live ZSTM_TRANSIT_D row, deduped to
+# the latest active DOCID per doff) — this inner join also acts as the scan filter.
 _FIN_SCAN_SELECT = (
     "SELECT A.BATCH_NO, A.ARTICLE, A.DYESET, A.SALES_ORDER_NO, A.LOT_NO, "
     "A.BEAM_NO, A.LOOM_NO, A.LEGACY_NO, B.DOFF_BATCHNO, B.DOFF_LENGTH, B.BATCH_NO, "
-    "B.DOCID, B.DOCID_DTL "
+    "B.DOCID, B.DOCID_DTL, "
+    "C.DOCID, C.WERKS, C.LGORT, C.UMLGO, C.MATNR, C.CHARG, C.MENGE, C.MEINS "
     "FROM SAPHANADB.ZWV_DOF_D A "
     "INNER JOIN SAPHANADB.ZWV_DOF_DD2 B ON A.DOCID = B.DOCID "
+    "INNER JOIN (SELECT DOFF_BATCHNO, MAX(DOCID) AS DOCID FROM SAPHANADB.ZSTM_TRANSIT_D "
+    "WHERE MANDT = '900' AND STATUS = 'Doff in Transit' AND REVERSED_BY = '' "
+    "GROUP BY DOFF_BATCHNO) CT ON CT.DOFF_BATCHNO = B.DOFF_BATCHNO "
+    "INNER JOIN SAPHANADB.ZSTM_TRANSIT_D C "
+    "ON C.MANDT = '900' AND C.DOCID = CT.DOCID AND C.DOFF_BATCHNO = CT.DOFF_BATCHNO "
     "WHERE A.MANDT = ? AND "
 )
 
@@ -228,7 +285,8 @@ def api_finishing_scan():
             records = matches
 
         if not records:
-            return jsonify({"error": "Batch not found for the scanned code."}), 404
+            return jsonify({"error": "Doff not found, or it is not in transit "
+                                     "(no live 3019 -> 3055 record)."}), 404
         return jsonify(records[0])
     except dbapi.Error as exc:
         return jsonify({"error": str(exc)}), 500
@@ -266,6 +324,126 @@ def _shift_for(hhmmss):
 def _strip_article(article):
     """Drop the first three characters (the 'FF ' prefix), e.g. 'FF HFZ-6514' -> 'HFZ-6514'."""
     return article[3:] if len(article) > 3 else article
+
+
+# ---------------------------------------------------------------------------
+# SAP RFC — 311 transfer posting (3019 -> 3055) via BAPI_GOODSMVT_CREATE
+# ---------------------------------------------------------------------------
+
+def _rfc_conn():
+    if not RFC_PARAMS:
+        raise RuntimeError(
+            "SAP RFC is not configured. Set SAP_ASHOST/SAP_SYSNR/SAP_CLIENT/"
+            "SAP_USER/SAP_PASSWD (or SAP_DEST) in server/.env, or SAP_RFC_MOCK=true."
+        )
+    try:
+        from pyrfc import Connection
+    except ImportError as exc:
+        raise RuntimeError(
+            "pyrfc is not installed (needs the SAP NW RFC SDK). Install it, or run "
+            "with SAP_RFC_MOCK=true / MOVE_311_ENABLED=false for UI development."
+        ) from exc
+    return Connection(**RFC_PARAMS)
+
+
+def _alpha18(m):
+    """ALPHA input conversion for classic numeric materials (zero-pad to 18)."""
+    m = (m or "").strip()
+    return m.zfill(18) if (m.isdigit() and len(m) <= 18) else m
+
+
+def _bapi_errors(return_rows):
+    msgs = []
+    for r in return_rows or []:
+        if str(r.get("TYPE", "")).upper() in ("E", "A"):
+            msgs.append(r.get("MESSAGE", "").strip() or f"{r.get('ID','')} {r.get('NUMBER','')}")
+    return msgs
+
+
+def _stock_at(cur, plant, lgort, matnr, charg):
+    """Unrestricted stock (MATDOC net) of a batch at a storage location. Decimal."""
+    cur.execute(
+        "SELECT SUM(CASE WHEN SHKZG='S' THEN TO_DECIMAL(MENGE) ELSE -TO_DECIMAL(MENGE) END) "
+        "FROM SAPHANADB.MATDOC WHERE MANDT=? AND WERKS=? AND LGORT=? AND MATNR=? "
+        "AND CHARG=? AND INSMK='' AND SOBKZ=''",
+        [FIN_MANDT, plant, lgort, _alpha18(matnr), charg],
+    )
+    row = cur.fetchone()
+    try:
+        return float(row[0]) if row and row[0] is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _post_311(plant, from_sloc, to_sloc, material, batch, qty, uom, operator):
+    """Post one same-plant 311 transfer (from_sloc -> to_sloc) as a material doc.
+    Returns {"matdoc","year","mock"} or raises ValueError (BAPI/business error)."""
+    if SAP_RFC_MOCK:
+        return {"matdoc": "49" + datetime.now().strftime("%H%M%S%f")[:8],
+                "year": str(date.today().year), "mock": True}
+
+    conn = _rfc_conn()
+    try:
+        item = {
+            "PLANT": plant,
+            "STGE_LOC": from_sloc,          # issuing (from)
+            "MOVE_TYPE": MOVE_TYPE,         # 311
+            "MOVE_STLOC": to_sloc,          # receiving (to)
+            "ENTRY_QNT": qty,
+            "ENTRY_UOM": uom,
+        }
+        if batch:
+            item["BATCH"] = batch
+        if USE_MATERIAL_LONG and len(material) > 18:
+            item["MATERIAL_LONG"] = material
+        else:
+            item["MATERIAL"] = _alpha18(material)
+
+        header_txt = (HEADER_TXT + " " + (operator or "")).strip()[:25]
+        result = conn.call(
+            "BAPI_GOODSMVT_CREATE",
+            GOODSMVT_HEADER={"PSTNG_DATE": date.today(), "DOC_DATE": date.today(),
+                             "HEADER_TXT": header_txt, "PR_UNAME": (operator or "")[:12]},
+            GOODSMVT_CODE={"GM_CODE": GM_CODE},
+            GOODSMVT_ITEM=[item],
+        )
+        errors = _bapi_errors(result.get("RETURN"))
+        if errors:
+            conn.call("BAPI_TRANSACTION_ROLLBACK")
+            raise ValueError("; ".join(errors))
+        headret = result.get("GOODSMVT_HEADRET") or {}
+        matdoc = headret.get("MAT_DOC") or result.get("MATERIALDOCUMENT") or ""
+        year = headret.get("DOC_YEAR") or result.get("MATDOCUMENTYEAR") or ""
+        if not matdoc:
+            conn.call("BAPI_TRANSACTION_ROLLBACK")
+            raise ValueError("SAP did not return a material document number.")
+        conn.call("BAPI_TRANSACTION_COMMIT", WAIT="X")
+        return {"matdoc": str(matdoc), "year": str(year), "mock": False}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _mark_transit_finished(conn, tr_docid, matdoc):
+    """Flag the transit row as finished once the 311 has posted (best-effort)."""
+    if not tr_docid:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE " + FIN_TRANSIT_TABLE + " SET STATUS = ?, REVERSAL_REASON = ? "
+            "WHERE MANDT = ? AND DOCID = ?",
+            ["Finished", ("MATDOC " + str(matdoc))[:100], FIN_MANDT, tr_docid],
+        )
+        conn.commit()
+        cur.close()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 # Header (ZFN_FAB_PRD_M) insert columns. Every other column is NOT NULL with a
@@ -572,36 +750,81 @@ def api_finishing_create():
 
     clean = {f: str(inp[f]).strip() for f in _FIN_REQUIRED_INPUT}
     clean["chksel"] = bool(inp.get("chksel"))
+    qty = int(clean["finishLength"])
 
-    # --- insert (retry once on a concurrent key clash) --------------------
+    # Transit context (from the scan) drives the 311 move 3019 -> 3055.
+    tr = {k: str(scan.get("TR_" + k.upper(), "")).strip()
+          for k in ("docid", "werks", "lgort", "umlgo", "matnr", "charg")}
+    tr["meins"] = str(scan.get("TR_MEINS", "")).strip() or "M"
+    if MOVE_311_ENABLED and not all(tr[k] for k in ("werks", "lgort", "umlgo", "matnr", "charg")):
+        return jsonify({"error": "This doff is not in transit (no 3019 transit record)."}), 400
+
     try:
         conn = get_conn()
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 500
 
+    move = None
     result = None
     try:
+        # 1) check available unrestricted stock at the source (3019).
+        if MOVE_311_ENABLED:
+            cur = conn.cursor()
+            avail = _stock_at(cur, tr["werks"], tr["lgort"], tr["matnr"], tr["charg"])
+            cur.close()
+            if qty > avail:
+                return jsonify({"error": "Not enough stock at %s for batch %s: need %d %s, "
+                                "available %g %s." % (tr["lgort"], tr["charg"], qty,
+                                tr["meins"], avail, tr["meins"]), "available": avail}), 409
+
+            # 2) post the 311 FIRST — if it fails, nothing else is written.
+            try:
+                move = _post_311(tr["werks"], tr["lgort"], tr["umlgo"], tr["matnr"],
+                                 tr["charg"], qty, tr["meins"], clean["operator"])
+            except RuntimeError as exc:          # not configured / pyrfc missing
+                return jsonify({"error": str(exc)}), 500
+            except ValueError as exc:            # BAPI / business error
+                return jsonify({"error": "311 posting failed: " + str(exc)}), 409
+            except Exception as exc:             # RFC / communication failure
+                return jsonify({"error": "311 posting failed: " + str(exc)}), 502
+
+        # 3) 311 done (or disabled): save the HANA header+detail.
         for attempt in range(2):
             try:
                 result = _fin_insert(conn, scan, clean, started, stopped)
                 break
             except dbapi.Error as exc:
                 try:
-                    conn.rollback()          # discard the partial header+detail
+                    conn.rollback()
                 except Exception:
                     pass
                 if attempt == 0 and getattr(exc, "errorcode", None) == 301:
                     continue
-                return jsonify({"error": str(exc)}), 500
+                msg = str(exc)
+                if move:                          # movement posted but save failed
+                    msg = ("311 posted as material doc %s, but the SAP finishing save "
+                           "failed (%s). Contact IT." % (move["matdoc"], msg))
+                return jsonify({"error": msg, "matdoc": move["matdoc"] if move else ""}), 500
+
+        if result is None:
+            return jsonify({"error": "Could not generate a unique document id."}), 500
+
+        # 4) mark the transit row finished (best-effort).
+        if move:
+            _mark_transit_finished(conn, tr["docid"], move["matdoc"])
     finally:
         conn.close()
 
-    if result is None:
-        return jsonify({"error": "Could not generate a unique document id."}), 500
-
-    # HANA (SAP) is saved. Mirror to the KT SQL Server best-effort — a failure
-    # here never undoes the SAP save; it just warns the operator.
     resp = {"docid": result["docid"]}
+    if move:
+        resp["matdoc"] = move["matdoc"]
+        resp["year"] = move.get("year", "")
+        resp["moved"] = {"from": tr["lgort"], "to": tr["umlgo"], "material": tr["matnr"],
+                         "batch": tr["charg"], "qty": qty, "uom": tr["meins"]}
+        if move.get("mock"):
+            resp["mock"] = True
+
+    # Mirror to KT SQL Server best-effort — a failure here never undoes the save.
     if KT_ENABLED:
         try:
             _kt_upsert(result["kt"])

@@ -25,7 +25,11 @@ mirrored to a KT SQL Server.
 
 ## Scan lookup (`GET /api/finishing/scan?doff=<code>`)
 
-Joins `SAPHANADB.ZWV_DOF_D` (A) ⋈ `ZWV_DOF_DD2` (B) on `DOCID`, `MANDT = 900`.
+Joins `SAPHANADB.ZWV_DOF_D` (A) ⋈ `ZWV_DOF_DD2` (B) ⋈ `ZSTM_TRANSIT_D` (C, on
+`DOFF_BATCHNO`), `MANDT = 900`. The **transit join is a filter**: only doffs with a
+live `ZSTM_TRANSIT_D` row (`STATUS='Doff in Transit'`, not reversed, deduped to the
+latest) are scannable — i.e. currently in transit `3019 → 3055`. The scan surfaces
+the transit context (`TR_WERKS/LGORT/UMLGO/MATNR/CHARG/MENGE/MEINS`).
 
 - The value is cleaned: keep the first whitespace token (drops a trailing label
   like `TRIAL`), upper-cased; separators kept for pattern matching.
@@ -41,9 +45,14 @@ Joins `SAPHANADB.ZWV_DOF_D` (A) ⋈ `ZWV_DOF_DD2` (B) on `DOCID`, `MANDT = 900`.
 
 ## Save (`POST /api/finishing/records`)
 
-Generates **one shared `DOCID`** = `MAX(DOCID over M and D) + 1`, zero-padded to 10,
-and writes the **header + detail in a single HANA transaction** (both or neither;
-retries once on a unique-key clash). Then **best-effort** mirrors to SQL Server.
+**Order on Save:** (0) check unrestricted stock at `3019`; (1) **post the 311
+transfer** `3019 → 3055` for the **Finish Length** via `BAPI_GOODSMVT_CREATE`
+(GM_CODE 04, move type 311) — if it fails, nothing else is written and the operator
+sees the error; on success the **material document** is shown. Then (2) generate
+**one shared `DOCID`** = `MAX(DOCID over M and D) + 1` and write the **header +
+detail in a single HANA transaction**; (3) mark the transit row **Finished**; (4)
+**best-effort** mirror to SQL Server. (`MOVE_311_ENABLED=false` or `SAP_RFC_MOCK=true`
+skips/fakes the posting for testing.)
 
 Computed values:
 - `DOCID_DTL` = next line seq for the DOCID → `0000000001` for a new DOCID.

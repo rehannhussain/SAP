@@ -1,116 +1,132 @@
 # CLAUDE.md
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
+For the full functional reference (field-by-field mappings), see **`wfn.md`**.
 
 ## What this is
 
-**ZWFN** — a SAP Fiori (SAPUI5 freestyle) shop-floor entry app for the **Finishing
-department's Sanforizing (SNFR)** operation, backed by a small Python Flask API that talks
-to SAP HANA (schema `SAPHANADB`) via `hdbcli`.
+**ZWFN** — a SAP Fiori (SAPUI5 freestyle) shop-floor app for the Finishing
+department's **Sanforizing (SNFR)** operation, backed by a Python Flask API.
 
-Flow: the operator **scans a doff QR** (`DOFF_BATCHNO`) → the screen shows the read-only
-production context → the operator enters finishing values and runs a **machine start/stop
-timer** → on Save one row is inserted into `SAPHANADB.ZFN_FAB_PRD_D`.
+Flow: the operator **scans a doff QR** → the screen shows the read-only batch
+context → enters finishing values and runs a **machine start/stop timer** → on
+**Save** the app (1) posts a **311 stock transfer 3019 → 3055**, (2) writes a
+**header + detail** in SAP HANA, (3) marks the doff's transit record **Finished**,
+and (4) mirrors the detail to a **KT SQL Server**.
 
-This app was migrated out of the ZMDASHBOARD2 meter-reading project into its own repo.
+Three backend systems:
+- **SAP HANA** (`SAPHANADB`, user `ZMSQL`) via `hdbcli` — reads + the M/D inserts.
+- **SAP (S/4HANA) RFC** (user `ZWFN_RFC`) via `pyrfc` — the 311 goods movement.
+- **MS SQL Server** (`KT.SAP_FinishingDetail`) via `pyodbc` — a best-effort mirror.
+
+Client `MANDT = 900` throughout.
 
 ## Run / develop
 
-**No build step, no Node toolchain.** Python is the runtime and the web server.
+**No build step, no Node toolchain.** Python is the runtime and web server.
 
-```bash
-pip install -r server/requirements.txt      # flask + hdbcli
-cp server/.env.example server/.env           # then fill in real HANA credentials
-python server/app.py                         # serves UI + API at http://localhost:8000
+```powershell
+# one-time
+pip install -r server/requirements.txt          # flask, hdbcli, pyodbc, pyrfc
+copy server\.env.example server\.env             # then fill in real credentials
+
+# every time (kills stale servers, starts ONE HTTPS server, prints the URL)
+.\run-https.ps1
 ```
 
-- `PORT` (env / `.env`) changes the port; default `8000`.
-- Flask runs with `debug=True` (Werkzeug reloader → two python processes). When
-  restarting, make sure **port 8000 is free**; kill lingering `server/app.py` processes.
-- No tests or linter configured.
+- `run-https.ps1` is the sanctioned launcher. Starting servers by hand lets stale
+  `app.py` processes pile up on port 8000 (Windows `SO_REUSEADDR`); an old
+  **plain-HTTP** one then answers and the iPad camera breaks with "needs a secure
+  connection". Always kill stale servers first (the script does).
+- Manual run: `cd` to the repo, `$env:USE_HTTPS="true"; python server/app.py`.
+  Confirm the console says **`Running on https://<lan-ip>:8000`**.
+- No tests or linter. Validate DB-write changes with **insert/rollback** scripts in
+  the scratchpad (never leave test rows); validate the 311 with **`SAP_RFC_MOCK=true`**
+  — never post a real goods movement while testing.
 
 ## Architecture
 
-**Single origin, no CORS.** `server/app.py` serves the static SAPUI5 app from `../webapp`
-at `/` *and* the JSON API under `/api/*`. The front end uses **relative** fetch paths
-(`fetch("api/finishing/scan")`) — never hardcode an origin/port.
+**Single origin, no CORS.** `server/app.py` serves the SAPUI5 app from `../webapp`
+at `/` *and* the JSON API under `/api/*`. The front end uses **relative** fetch
+paths (`fetch("api/finishing/scan")`) — never hardcode an origin/port.
 
-**Back end** (`server/app.py`, Flask + `hdbcli`), two endpoints:
-- `GET /api/finishing/scan?doff=<code>` — parameterized join of `ZWV_DOF_D` /
-  `ZWV_DOF_DD2` (`MANDT='900'`); returns the single batch row or `404`. The scan value is
-  normalized (`_clean_scan`): the first whitespace token is kept (drops a trailing label
-  like `TRIAL`). It first tries an **exact** match (dashes removed); if that misses and the
-  code is dashed (e.g. `261042-528-1446-01`, a QR that omits the `KT3L…` loom code baked
-  into `DOFF_BATCHNO`), it matches **`lot% + tail`** (`261042%528144601`) and accepts it
-  **only when exactly one** batch matches (else `409`, never a wrong guess).
-- `POST /api/finishing/records` — inserts one run into `ZFN_FAB_PRD_D`. Server generates
-  `DOCID = MAX(TO_BIGINT(DOCID))+1` (guarded against non-numeric ids, `MANDT='900'`),
-  zero-padded to 10, retrying once on a unique-key clash (errorcode 301). Machine duration
-  is recomputed server-side from the client start/stop timestamps: `TIMEUP` = total
-  **seconds**, `TIMEMINUTES` = total **minutes**. Fixed values: `OPERATION='SNFR'`,
-  `FINISH_TYPE='FINISH'`, and the `ZWFN` TCODE stored in `REMARKS` (there is no TCODE
-  column). `USERIN`/`USERUP`/`OPERATOR` = the entered operator. Only ~32 business columns
-  are listed; every other column of the table is NOT NULL but has a DB default.
+### Scan — `GET /api/finishing/scan?doff=<code>`
+`ZWV_DOF_D` (A) ⋈ `ZWV_DOF_DD2` (B) ⋈ **`ZSTM_TRANSIT_D`** (C, on `DOFF_BATCHNO`).
+- The transit join is a **filter**: only doffs with a live `ZSTM_TRANSIT_D` row
+  (`STATUS='Doff in Transit'`, not reversed, deduped to the latest DOCID per doff)
+  are scannable — i.e. currently in transit `3019 → 3055`. 404 otherwise.
+- Value normalization (`_scan_forms`): first whitespace token, upper-cased. Tries an
+  **exact** match (separators removed); if that misses and the code is separated
+  (e.g. `261042-528-1446-01`, a QR that omits the `KT3L…` loom code), matches
+  **`lot% + tail`** and accepts it **only when exactly one** batch matches (else 409).
+- Returns batch context + `DD_BATCH_NO` (B.BATCH_NO), doff `DOFF_DOCID/_DTL`
+  (B.DOCID/DOCID_DTL), and the transit context `TR_*` (WERKS/LGORT/UMLGO/MATNR/
+  CHARG/MENGE/MEINS).
 
-**Front end** (`webapp/`, namespace `finishing.sanfor`) — plain `fetch()` (no OData):
-- `index.html` → `Component.js` → `manifest.json` (`rootView` = `view/FinishingForm`).
-- Compact single-screen iPad layout, theme `sap_horizon`: a branded header with a
-  **top-left logo**, a **prominent** action toolbar (Start/Stop + machine times +
-  Save/Clear), and **Batch Details beside Finishing Entry**. Verified no-scroll at
-  1024×768 and 768×1024.
-- One ComboBox drives two columns: its **key = `MACHINE_WORKCEN`** code and its
-  **text = `PROCESS_TYPE`** name (`ZMUF_01`=MUZZI, `ZMSN_01`=MORRISON, `ZCIS_01`=MONFORT,
-  `ZRFS_01`=CIBITEX SANFOR).
-- **Camera QR scan (iPad):** a *Scan QR* button opens the rear camera in a dialog and
-  decodes with **jsQR** (vendored locally at `webapp/lib/jsQR.js`, MIT, loaded via a plain
-  `<script>` in `index.html`; Safari has no `BarcodeDetector`). The controller draws video
-  frames to a canvas and runs `jsQR` per `requestAnimationFrame`; on a hit it fills the
-  scan field and runs the normal lookup. Camera errors (permission/insecure context) are
-  caught and surfaced as a MessageBox — no crash, and the handheld-scanner / type path
-  still works.
+### Save — `POST /api/finishing/records`
+Order matters (the 311 is authoritative):
+0. **Check** unrestricted stock at `3019` for the batch (MATDOC net).
+1. **Post the 311** for the entered **Finish Length** via `BAPI_GOODSMVT_CREATE`
+   (GM_CODE 04, move type 311) + `BAPI_TRANSACTION_COMMIT`. **Fail ⇒ nothing else is
+   written**; success ⇒ a material document number.
+2. **HANA**: one shared `DOCID = MAX(DOCID over M and D)+1`; write the **header
+   (`ZFN_FAB_PRD_M`) + detail (`ZFN_FAB_PRD_D`)** in a single transaction
+   (retry once on a 301 key clash).
+3. **Mark** the transit row `STATUS='Finished'` (+ material doc in `REVERSAL_REASON`).
+4. **KT mirror** (`SAP_FinishingDetail`) best-effort — a failure only warns.
 
-## HTTPS (required for the iPad camera)
+Key computed fields (full tables in `wfn.md`): `ARTICLE` drops the first 3 chars
+(`FF HFZ-6514`→`HFZ-6514`); `TIMEUP` = elapsed **HHMMSS**, `TIMEMINUTES` = minutes;
+`SHIFT` A/B/C from start time; `AUFNR/OUT_MATNR/OUT_UOM` from a ZSIZ_PLN ⋈ AFKO
+lookup reading **MATDOC** (MSEG is empty here) + MARA; `Dye_Stop` from
+`ZSIZE_PRD_M/D DYES_STOP='YES'`; `FINISH_TYPE` is a dropdown (FINISH/REFINISH/
+LEADLINE) → **M header only** (D stays `FINISH`); `CHKSEL='X'` from the checkbox.
 
-Safari blocks `getUserMedia` over plain `http://` on a LAN IP, so the camera scan only
-works over HTTPS. Run with `USE_HTTPS=true` (env or `.env`): `server/app.py` uses
-`server/cert.pem` + `server/key.pem` if present, else a throwaway **adhoc** cert
-(needs the `cryptography` package; a new cert each restart, so the iPad re-accepts the
-warning every time). For a stable cert including your LAN IP:
+### Availability — `GET /api/health`
+`SELECT 1 FROM DUMMY`. The UI shows a red banner + disables scan/save when HANA is
+unreachable; short HANA timeouts (`HANA_TIMEOUT_MS`) fail fast.
 
-```bash
-openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
-  -keyout server/key.pem -out server/cert.pem -subj "/CN=zwfn-finishing" \
-  -addext "subjectAltName=IP:<YOUR_LAN_IP>,IP:127.0.0.1,DNS:localhost"
-```
+### Front end (`webapp/`, namespace `finishing.sanfor`)
+Plain `fetch()` (no OData). Compact single-screen iPad layout, theme `sap_horizon`:
+branded header with a top-left logo, a prominent action toolbar (Start/Stop +
+Save/Clear), machine times on their own line, Batch Details beside Finishing Entry.
+Process ComboBox key=`MACHINE_WORKCEN` / text=`PROCESS_TYPE`. **Camera Scan QR**
+decodes with vendored **jsQR** (`webapp/lib/jsQR.js`); Safari has no `BarcodeDetector`
+and needs HTTPS for the camera. The Saved dialog shows the `DOCID` and the 311
+material document.
 
-Then on the iPad open `https://<host-lan-ip>:8000`, accept the self-signed warning once,
-and allow camera access. `cert.pem`/`key.pem` are gitignored.
+## Config (`server/.env`, gitignored)
+- HANA: `HANA_HOST/PORT/USER/PASSWORD`, `HANA_TIMEOUT_MS`.
+- HTTPS: `USE_HTTPS`, optional `server/cert.pem`+`key.pem`.
+- KT SQL Server: `KT_SERVER/DATABASE/UID/PWD/DRIVER`, `KT_ENABLED`.
+- SAP RFC: `SAP_ASHOST/SYSNR/CLIENT/USER/PASSWD`, `SAP_GM_CODE`, `SAP_MOVE_TYPE`,
+  `SAP_USE_MATERIAL_LONG`, `MOVE_311_ENABLED`, `SAP_RFC_MOCK`.
 
 ## Conventions & gotchas
-
-- **UI5 runtime is hosted locally** at `webapp/resources/` (OpenUI5 **1.120.30**), served by
-  Flask, so `index.html` bootstraps from `src="resources/sap-ui-core.js"`. This loads at LAN
-  speed and needs **no internet** — first load ~1 s on the LAN (~8 MB uncached) vs many
-  seconds from the public CDN. `webapp/resources/` is **gitignored** (~540 MB, third-party,
-  not source). To fall back to the CDN, set the bootstrap `src` to
-  `https://sdk.openui5.org/1.120.30/resources/sap-ui-core.js` (only specific 1.120.x patches
-  are hosted — `.28`/`.30`, not `.0`).
-  **Re-create the local runtime** (after a fresh clone or a version bump):
+- **UI5 runtime is hosted locally** at `webapp/resources/` (OpenUI5 **1.120.30**,
+  ~540 MB, **gitignored**); `index.html` bootstraps `src="resources/sap-ui-core.js"`.
+  Re-create after a fresh clone:
   ```bash
   curl -sL -o /tmp/ui5.zip https://github.com/SAP/openui5/releases/download/1.120.30/openui5-runtime-1.120.30.zip
   python -c "import zipfile; z=zipfile.ZipFile('/tmp/ui5.zip'); z.extractall('webapp', [n for n in z.namelist() if n.startswith('resources/') and not n.endswith('/')])"
   ```
 - **`webapp/index.html` has a load-bearing height fix** (`html,body,#content` +
-  `#content .sapUiView` at `height:100%` plus `data-height="100%"`); removing it renders
-  the page blank. It also carries the machine-running keyframes and the `.finActionBar`
-  toolbar styling (uses SAP theme CSS vars with hex fallbacks).
-- **Logo is a placeholder** — `webapp/img/logo.svg`. Replace it with the licensed
-  SAP/company asset (same path, or repoint the `Image` src in the view).
-- **UI5 caches XML views aggressively.** After editing a `.view.xml`, hard-refresh
-  (Ctrl+F5). XML comments must not contain `--` (double hyphen) or the view fails to parse.
-- The `Component-preload.js` 404 in the console is expected (no optimized UI5 build).
-- **Secrets:** only `server/.env` (gitignored) holds real credentials; keep
-  `server/.env.example` as placeholders.
-- **HANA write grant:** the `ZMSQL` DB user has schema-wide SELECT but per-table INSERT.
-  Inserts into `ZFN_FAB_PRD_D` fail with HANA **error 258 "insufficient privilege"** until
-  a DBA runs `GRANT INSERT ON SAPHANADB.ZFN_FAB_PRD_D TO ZMSQL;`.
+  `#content .sapUiView` at `height:100%`); removing it renders the page blank. It also
+  carries the running-animation keyframes and `.finActionBar`/`.finTimesBar` styling.
+- **UI5 caches XML views.** Hard-refresh after editing a `.view.xml`. **XML comments
+  must not contain `--`** (double hyphen) or the view fails to parse.
+- The `Component-preload.js` 404 is expected (no optimized UI5 build).
+- **Logo** `webapp/img/logo.svg` is a placeholder — swap for the licensed asset.
+- **Secrets** live only in `server/.env` (gitignored); keep `.env.example` as
+  placeholders. `cert.pem`/`key.pem` and `webapp/resources/` are gitignored too.
+- **Stock lives in MATDOC, not MSEG/MARD/MCHB** on this S/4HANA — MSEG is empty and
+  the aggregates are 0. Read stock from `MATDOC`. Move type 311 is posted via BAPI,
+  never by writing MARD/MCHB/MSEG. Numeric materials are ALPHA-padded to 18 (or
+  `MATERIAL_LONG` when >18). `ENTRY_QNT` must be a **Decimal** for pyrfc.
+- **Cross-system writes aren't one transaction:** 311 posts first and is authoritative;
+  if the HANA save then fails, the error returned includes the material document
+  number so the movement can be reconciled.
+- **HANA grants:** `ZMSQL` needs INSERT on **both** `ZFN_FAB_PRD_M` and
+  `ZFN_FAB_PRD_D` (`GRANT INSERT ON SAPHANADB.<table> TO ZMSQL;`).
+- **pyrfc** needs the SAP NW RFC SDK (`SAPNWRFC_HOME`, default `C:\SAP\nwrfcsdk`);
+  `_register_nwrfc_sdk()` adds its `lib` to the DLL path on Windows.
